@@ -710,13 +710,17 @@ void EditorDebuggerNode::_filesystem_resources_reloaded(const PackedStringArray 
 	// Files edited outside the editor were detected as changed on disk. Forward them to the
 	// running game so they hot-reload, mirroring what already happens on an in-editor save.
 	PackedStringArray scripts;
-	PackedStringArray others;
+	PackedStringArray cached_files;
+	PackedStringArray scenes;
 	for (const String &path : p_resources) {
 		const String type = ResourceLoader::get_resource_type(path);
 		if (ClassDB::is_parent_class(type, "Script")) {
 			scripts.push_back(path);
 		} else {
-			others.push_back(path);
+			cached_files.push_back(path);
+			if (type == "PackedScene") {
+				scenes.push_back(path);
+			}
 		}
 	}
 
@@ -730,9 +734,42 @@ void EditorDebuggerNode::_filesystem_resources_reloaded(const PackedStringArray 
 		}
 	}
 
-	// Scenes and other resources are reloaded from disk in the running game.
-	if (!others.is_empty()) {
-		reload_cached_files(others);
+	// Scenes and other resources are reloaded from disk in the running game so that any new
+	// instances and shared resources (materials, etc.) pick up the changes.
+	if (!cached_files.is_empty()) {
+		reload_cached_files(cached_files);
+	}
+
+	// For scenes, also push the on-disk node property values to the already running instance as
+	// live edits, so changes are visible without re-instantiating the scene (this is gated by
+	// the "Synchronize Scene Changes" option via `live_set_node_property()`).
+	for (const String &path : scenes) {
+		_sync_scene_to_running_game(path);
+	}
+}
+
+void EditorDebuggerNode::_sync_scene_to_running_game(const String &p_scene_path) {
+	// Load the scene as it now exists on disk (bypassing the cache) and push each explicitly
+	// set node property to the running game as a live edit. This makes an externally edited
+	// scene update the running instance the same way editing it in the scene editor would,
+	// without losing runtime state. Properties not stored in the scene file (i.e. left at their
+	// default) and structural changes (added/removed/reparented nodes) are not handled here.
+	Ref<PackedScene> packed_scene = ResourceLoader::load(p_scene_path, "PackedScene", ResourceFormatLoader::CACHE_MODE_IGNORE);
+	if (packed_scene.is_null()) {
+		return;
+	}
+
+	Ref<SceneState> state = packed_scene->get_state();
+	if (state.is_null()) {
+		return;
+	}
+
+	for (int node = 0; node < state->get_node_count(); node++) {
+		const NodePath node_path = state->get_node_path(node);
+		const int property_count = state->get_node_property_count(node);
+		for (int prop = 0; prop < property_count; prop++) {
+			live_set_node_property(node_path, state->get_node_property_name(node, prop), state->get_node_property_value(node, prop));
+		}
 	}
 }
 
@@ -949,6 +986,12 @@ void EditorDebuggerNode::live_debug_duplicate_node(const NodePath &p_at, const S
 void EditorDebuggerNode::live_debug_reparent_node(const NodePath &p_at, const NodePath &p_new_place, const String &p_new_name, int p_at_pos) {
 	_for_all(tabs, [&](ScriptEditorDebugger *dbg) {
 		dbg->live_debug_reparent_node(p_at, p_new_place, p_new_name, p_at_pos);
+	});
+}
+
+void EditorDebuggerNode::live_set_node_property(const NodePath &p_path, const StringName &p_property, const Variant &p_value) {
+	_for_all(tabs, [&](ScriptEditorDebugger *dbg) {
+		dbg->live_set_node_property(p_path, p_property, p_value);
 	});
 }
 
