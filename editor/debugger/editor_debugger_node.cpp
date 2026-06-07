@@ -31,7 +31,6 @@
 #include "editor_debugger_node.h"
 
 #include "core/config/engine.h"
-#include "core/io/file_access.h"
 #include "core/io/resource_loader.h"
 #include "core/object/callable_mp.h"
 #include "core/object/class_db.h"
@@ -775,7 +774,9 @@ void EditorDebuggerNode::_collect_changed_scenes(EditorFileSystemDirectory *p_di
 		}
 
 		const String path = p_dir->get_file_path(i);
-		const uint64_t modified_time = FileAccess::get_modified_time(path);
+		// Use the modification time cached by `EditorFileSystem::scan_changes()` (invoked just
+		// before this in the process loop) to avoid a `stat()` per scene file on every tick.
+		const uint64_t modified_time = p_dir->get_file_modified_time(i);
 		const uint64_t *last_modified_time = scene_modified_times.getptr(path);
 		if (last_modified_time && *last_modified_time != modified_time) {
 			r_changed.push_back(path);
