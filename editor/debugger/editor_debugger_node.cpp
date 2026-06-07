@@ -45,6 +45,7 @@
 #include "editor/editor_node.h"
 #include "editor/editor_string_names.h"
 #include "editor/editor_undo_redo_manager.h"
+#include "editor/file_system/editor_file_system.h"
 #include "editor/run/editor_run_bar.h"
 #include "editor/script/script_editor_plugin.h"
 #include "editor/settings/editor_command_palette.h"
@@ -358,6 +359,7 @@ void EditorDebuggerNode::_notification(int p_what) {
 		case NOTIFICATION_READY: {
 			_update_debug_options();
 			initializing = false;
+			EditorFileSystem::get_singleton()->connect("resources_reload", callable_mp(this, &EditorDebuggerNode::_filesystem_resources_reloaded));
 		} break;
 
 		case NOTIFICATION_PROCESS: {
@@ -372,6 +374,17 @@ void EditorDebuggerNode::_notification(int p_what) {
 			server->poll();
 
 			_update_errors();
+
+			// Poll the filesystem for external changes so that files edited outside the editor
+			// (e.g. by an external tool) hot-reload in the running game without requiring the
+			// editor to regain focus. `scan_changes()` emits `resources_reload` for any changed
+			// non-imported files, which is handled by `_filesystem_resources_reloaded()`.
+			external_reload_scan_timeout -= get_process_delta_time();
+			if (external_reload_scan_timeout < 0) {
+				// Matches the editor's own background `scan_changes_timer` cadence.
+				external_reload_scan_timeout = 0.5;
+				EditorFileSystem::get_singleton()->scan_changes();
+			}
 
 			// Remote scene tree update.
 			if (!remote_scene_tree_wait) {
@@ -685,6 +698,42 @@ void EditorDebuggerNode::reload_scripts(const Vector<String> &p_script_paths) {
 	_for_all(tabs, [&](ScriptEditorDebugger *dbg) {
 		dbg->reload_scripts(p_script_paths);
 	});
+}
+
+void EditorDebuggerNode::reload_cached_files(const PackedStringArray &p_files) {
+	_for_all(tabs, [&](ScriptEditorDebugger *dbg) {
+		dbg->reload_cached_files(p_files);
+	});
+}
+
+void EditorDebuggerNode::_filesystem_resources_reloaded(const PackedStringArray &p_resources) {
+	// Files edited outside the editor were detected as changed on disk. Forward them to the
+	// running game so they hot-reload, mirroring what already happens on an in-editor save.
+	PackedStringArray scripts;
+	PackedStringArray others;
+	for (const String &path : p_resources) {
+		const String type = ResourceLoader::get_resource_type(path);
+		if (ClassDB::is_parent_class(type, "Script")) {
+			scripts.push_back(path);
+		} else {
+			others.push_back(path);
+		}
+	}
+
+	// Scripts go through the script editor's live-reload path, which honors the
+	// "Synchronize Script Changes" option and skips scripts that fail to parse.
+	if (!scripts.is_empty()) {
+		if (ScriptEditor *se = ScriptEditor::get_singleton()) {
+			for (const String &path : scripts) {
+				se->trigger_live_script_reload(path);
+			}
+		}
+	}
+
+	// Scenes and other resources are reloaded from disk in the running game.
+	if (!others.is_empty()) {
+		reload_cached_files(others);
+	}
 }
 
 void EditorDebuggerNode::debug_next() {

@@ -107,6 +107,11 @@ private:
 	bool remote_scene_tree_wait = false;
 	float remote_scene_tree_timeout = 0.0;
 	bool remote_scene_tree_clear_msg = true;
+
+	// Hands-free external hot reload: while debugging, periodically scan the filesystem so
+	// that files edited outside the editor reload in the running game without needing the
+	// editor to regain focus.
+	float external_reload_scan_timeout = 0.0;
 	bool auto_switch_remote_scene_tree = false;
 	bool debug_with_external_editor = false;
 	bool keep_open = false;
@@ -122,6 +127,7 @@ private:
 	ScriptEditorDebugger *_add_debugger();
 	void _update_errors();
 	void _update_margins();
+	void _filesystem_resources_reloaded(const PackedStringArray &p_resources);
 
 	friend class DebuggerEditorPlugin;
 	friend class DebugAdapterParser;
@@ -191,6 +197,7 @@ public:
 	void set_breakpoints(const String &p_path, const Array &p_lines);
 	void reload_all_scripts();
 	void reload_scripts(const Vector<String> &p_script_paths);
+	void reload_cached_files(const PackedStringArray &p_files);
 
 	// Remote inspector/edit.
 	void request_remote_tree();

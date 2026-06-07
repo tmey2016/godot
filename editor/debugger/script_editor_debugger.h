@@ -380,6 +380,7 @@ public:
 
 	void reload_all_scripts();
 	void reload_scripts(const Vector<String> &p_script_paths);
+	void reload_cached_files(const PackedStringArray &p_files);
 
 	bool is_skip_breakpoints() const;
 	bool is_ignore_error_breaks() const;

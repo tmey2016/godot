@@ -1420,9 +1420,13 @@ String ScriptEditorDebugger::get_var_value(const String &p_var) const {
 	return inspector->get_stack_variable(p_var);
 }
 
-void ScriptEditorDebugger::_resources_reimported(const PackedStringArray &p_resources) {
-	Array msg = { p_resources };
+void ScriptEditorDebugger::reload_cached_files(const PackedStringArray &p_files) {
+	Array msg = { p_files };
 	_put_msg("scene:reload_cached_files", msg);
+}
+
+void ScriptEditorDebugger::_resources_reimported(const PackedStringArray &p_resources) {
+	reload_cached_files(p_resources);
 }
 
 int ScriptEditorDebugger::_get_node_path_cache(const NodePath &p_path) {
