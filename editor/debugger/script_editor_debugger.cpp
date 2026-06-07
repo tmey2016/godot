@@ -1560,6 +1560,11 @@ void ScriptEditorDebugger::reconcile_scene(const String &p_scene_path) {
 	_put_msg("scene:reconcile_scene", msg);
 }
 
+void ScriptEditorDebugger::set_external_reload_enabled(bool p_enabled) {
+	Array msg = { p_enabled };
+	_put_msg("scene:set_external_reload_enabled", msg);
+}
+
 bool ScriptEditorDebugger::is_move_to_foreground() const {
 	return move_to_foreground;
 }

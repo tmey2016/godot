@@ -1,5 +1,5 @@
 /**************************************************************************/
-/*  debugger_editor_plugin.h                                              */
+/*  editor_external_reload.h                                              */
 /**************************************************************************/
 /*                         This file is part of:                          */
 /*                             GODOT ENGINE                               */
@@ -30,45 +30,30 @@
 
 #pragma once
 
-#include "editor/plugins/editor_plugin.h"
+#include "core/string/ustring.h"
+#include "core/templates/hash_map.h"
+#include "core/variant/variant.h"
 
-class EditorFileServer;
-class MenuButton;
-class PopupMenu;
-class RunInstancesDialog;
+class EditorDebuggerNode;
+class EditorFileSystemDirectory;
 
-class DebuggerEditorPlugin : public EditorPlugin {
-	GDCLASS(DebuggerEditorPlugin, EditorPlugin);
+// Detects files edited outside the editor (by modification time, across the whole project) and
+// forwards them to a running debug game so they hot-reload. Disabled by default; gated by the
+// "Synchronize External File Changes" debug option. Per-type changes still defer to the existing
+// "Synchronize Script/Scene Changes" options.
+class EditorExternalReload {
+	bool enabled = false;
+	double scan_timeout = 0.0;
+	HashMap<String, uint64_t> file_modified_times;
 
-private:
-	PopupMenu *debug_menu = nullptr;
-	EditorFileServer *file_server = nullptr;
-	RunInstancesDialog *run_instances_dialog = nullptr;
-
-	enum MenuOptions {
-		RUN_FILE_SERVER,
-		RUN_LIVE_DEBUG,
-		RUN_DEBUG_COLLISIONS,
-		RUN_DEBUG_PATHS,
-		RUN_DEBUG_NAVIGATION,
-		RUN_DEBUG_AVOIDANCE,
-		RUN_DEBUG_CANVAS_REDRAW,
-		RUN_DEPLOY_REMOTE_DEBUG,
-		RUN_RELOAD_SCRIPTS,
-		RUN_RELOAD_EXTERNAL,
-		SERVER_KEEP_OPEN,
-		RUN_MULTIPLE_INSTANCES,
-	};
-
-	bool initializing = true;
-
-	void _update_debug_options();
-	void _notification(int p_what);
-	void _menu_option(int p_option);
+	void _collect_changed_files(EditorFileSystemDirectory *p_dir, PackedStringArray &r_scripts, PackedStringArray &r_scenes, PackedStringArray &r_resources);
 
 public:
-	virtual String get_plugin_name() const override { return "Debugger"; }
+	void set_enabled(bool p_enabled) { enabled = p_enabled; }
+	bool is_enabled() const { return enabled; }
 
-	DebuggerEditorPlugin(PopupMenu *p_menu);
-	~DebuggerEditorPlugin();
+	// Called every frame while debugging. Throttles internally and, when enabled, scans the project
+	// for externally modified files and forwards them to the running game through `p_debugger`.
+	// No-op unless enabled.
+	void poll(EditorDebuggerNode *p_debugger, double p_delta);
 };

@@ -32,13 +32,13 @@
 
 #include "core/object/script_language.h"
 #include "editor/debugger/editor_debugger_server.h"
+#include "editor/debugger/editor_external_reload.h"
 #include "editor/docks/editor_dock.h"
 
 class Button;
 class DebugAdapterParser;
 class EditorDebuggerPlugin;
 class EditorDebuggerTree;
-class EditorFileSystemDirectory;
 class EditorDebuggerRemoteObjects;
 class MenuButton;
 class ScriptEditorDebugger;
@@ -109,11 +109,10 @@ private:
 	float remote_scene_tree_timeout = 0.0;
 	bool remote_scene_tree_clear_msg = true;
 
-	// Hands-free external hot reload: while debugging, periodically scan the filesystem so
-	// that files edited outside the editor reload in the running game without needing the
-	// editor to regain focus.
-	float external_reload_scan_timeout = 0.0;
-	HashMap<String, uint64_t> file_modified_times;
+	// Hands-free external hot reload: while debugging, polls the filesystem so files edited outside
+	// the editor reload in the running game without needing the editor to regain focus. Disabled by
+	// default; see `EditorExternalReload` and `set_external_reload_enabled()`.
+	EditorExternalReload external_reload;
 	bool auto_switch_remote_scene_tree = false;
 	bool debug_with_external_editor = false;
 	bool keep_open = false;
@@ -129,8 +128,6 @@ private:
 	ScriptEditorDebugger *_add_debugger();
 	void _update_errors();
 	void _update_margins();
-	void _sync_changed_files();
-	void _collect_changed_files(EditorFileSystemDirectory *p_dir, PackedStringArray &r_scripts, PackedStringArray &r_scenes, PackedStringArray &r_resources);
 
 	friend class DebuggerEditorPlugin;
 	friend class DebugAdapterParser;
@@ -201,6 +198,9 @@ public:
 	void reload_all_scripts();
 	void reload_scripts(const Vector<String> &p_script_paths);
 	void reload_cached_files(const PackedStringArray &p_files);
+
+	// Enables/disables hot-reloading files edited outside the editor into the running game.
+	void set_external_reload_enabled(bool p_enabled);
 
 	// Remote inspector/edit.
 	void request_remote_tree();

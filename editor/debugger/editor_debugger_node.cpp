@@ -45,7 +45,6 @@
 #include "editor/editor_node.h"
 #include "editor/editor_string_names.h"
 #include "editor/editor_undo_redo_manager.h"
-#include "editor/file_system/editor_file_system.h"
 #include "editor/run/editor_run_bar.h"
 #include "editor/script/script_editor_plugin.h"
 #include "editor/settings/editor_command_palette.h"
@@ -374,18 +373,9 @@ void EditorDebuggerNode::_notification(int p_what) {
 
 			_update_errors();
 
-			// Poll the filesystem for external changes so that files edited outside the editor
-			// (e.g. by an external tool) hot-reload in the running game without requiring the
-			// editor to regain focus. `scan_changes()` refreshes the filesystem's cached metadata
-			// (including reimporting changed assets); `_sync_changed_files()` then forwards changed
-			// scripts, scenes and resources to the running game.
-			external_reload_scan_timeout -= get_process_delta_time();
-			if (external_reload_scan_timeout < 0) {
-				// Matches the editor's own background `scan_changes_timer` cadence.
-				external_reload_scan_timeout = 0.5;
-				EditorFileSystem::get_singleton()->scan_changes();
-				_sync_changed_files();
-			}
+			// Poll for files edited outside the editor and hot-reload them into the running game,
+			// without requiring the editor to regain focus. Throttles internally; no-op unless enabled.
+			external_reload.poll(this, get_process_delta_time());
 
 			// Remote scene tree update.
 			if (!remote_scene_tree_wait) {
@@ -450,6 +440,9 @@ void EditorDebuggerNode::_notification(int p_what) {
 				} // Will arrive too late, how does the regular run work?
 
 				debugger->update_live_edit_root();
+				// Tell the freshly connected game whether external hot reload is enabled, so its
+				// game-side bookkeeping matches the editor's switch.
+				debugger->set_external_reload_enabled(external_reload.is_enabled());
 			}
 		} break;
 	}
@@ -707,82 +700,12 @@ void EditorDebuggerNode::reload_cached_files(const PackedStringArray &p_files) {
 	});
 }
 
-void EditorDebuggerNode::_sync_changed_files() {
-	// Files edited outside the editor are not reliably reported through `resources_reload`: that
-	// signal only carries files kept in the editor's resource cache, so it misses scenes and
-	// resources whose owning scene is not open. Instead, detect changes across the whole project
-	// by modification time and forward them to the running game, which works regardless of whether
-	// a file is open in the editor. Imported assets are skipped here; they go through the reimport
-	// pipeline (`resources_reimported` -> `reload_cached_files`) instead.
-	EditorFileSystem *efs = EditorFileSystem::get_singleton();
-	if (!efs) {
-		return;
-	}
-
-	PackedStringArray scripts;
-	PackedStringArray scenes;
-	PackedStringArray resources;
-	_collect_changed_files(efs->get_filesystem(), scripts, scenes, resources);
-
-	// Scripts go through the script editor's live-reload path, which honors the "Synchronize
-	// Script Changes" option and skips scripts that fail to parse.
-	if (!scripts.is_empty()) {
-		if (ScriptEditor *se = ScriptEditor::get_singleton()) {
-			for (const String &path : scripts) {
-				se->trigger_live_script_reload(path);
-			}
-		}
-	}
-
-	// Non-scene resources (materials, native resources, etc.) are reloaded from disk in the
-	// running game so shared resources update and new instances pick up the changes.
-	if (!resources.is_empty()) {
-		reload_cached_files(resources);
-	}
-
-	// Scenes are reconciled into the running instances by unique node id, which applies property
-	// changes/reverts and structural changes (add/remove/reparent/reorder) while preserving
-	// runtime state. The reconcile also refreshes the cached `PackedScene` for future instances.
-	for (const String &path : scenes) {
-		reconcile_scene(path);
-	}
-}
-
-void EditorDebuggerNode::_collect_changed_files(EditorFileSystemDirectory *p_dir, PackedStringArray &r_scripts, PackedStringArray &r_scenes, PackedStringArray &r_resources) {
-	if (!p_dir) {
-		return;
-	}
-
-	for (int i = 0; i < p_dir->get_file_count(); i++) {
-		// Imported assets (those with a `.import`) are handled by the reimport pipeline, not here.
-		if (p_dir->get_file_import_modified_time(i) != 0) {
-			continue;
-		}
-
-		const String path = p_dir->get_file_path(i);
-		// Use the modification time cached by `EditorFileSystem::scan_changes()` (invoked just
-		// before this in the process loop) to avoid a `stat()` per file on every tick.
-		const uint64_t modified_time = p_dir->get_file_modified_time(i);
-		const uint64_t *last_modified_time = file_modified_times.getptr(path);
-		const bool changed = last_modified_time && *last_modified_time != modified_time;
-		file_modified_times[path] = modified_time;
-		if (!changed) {
-			continue;
-		}
-
-		const StringName type = p_dir->get_file_type(i);
-		if (ClassDB::is_parent_class(type, "Script")) {
-			r_scripts.push_back(path);
-		} else if (type == SNAME("PackedScene")) {
-			r_scenes.push_back(path);
-		} else {
-			r_resources.push_back(path);
-		}
-	}
-
-	for (int i = 0; i < p_dir->get_subdir_count(); i++) {
-		_collect_changed_files(p_dir->get_subdir(i), r_scripts, r_scenes, r_resources);
-	}
+void EditorDebuggerNode::set_external_reload_enabled(bool p_enabled) {
+	external_reload.set_enabled(p_enabled);
+	// Mirror the state into every running game so its game-side bookkeeping stays inert when disabled.
+	_for_all(tabs, [&](ScriptEditorDebugger *dbg) {
+		dbg->set_external_reload_enabled(p_enabled);
+	});
 }
 
 void EditorDebuggerNode::debug_next() {

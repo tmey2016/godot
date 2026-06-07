@@ -368,6 +368,7 @@ public:
 	void live_debug_duplicate_node(const NodePath &p_at, const String &p_new_name);
 	void live_debug_reparent_node(const NodePath &p_at, const NodePath &p_new_place, const String &p_new_name, int p_at_pos);
 	void reconcile_scene(const String &p_scene_path);
+	void set_external_reload_enabled(bool p_enabled);
 
 	bool get_debug_mute_audio() const;
 	void set_debug_mute_audio(bool p_mute);

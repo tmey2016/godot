@@ -91,6 +91,9 @@ DebuggerEditorPlugin::DebuggerEditorPlugin(PopupMenu *p_debug_menu) {
 	debug_menu->add_check_shortcut(ED_SHORTCUT("editor/sync_script_changes", TTRC("Synchronize Script Changes")), RUN_RELOAD_SCRIPTS);
 	debug_menu->set_item_tooltip(-1,
 			TTRC("When this option is enabled, any script that is saved will be reloaded in the running project.\nWhen used remotely on a device, this is more efficient when the network filesystem option is enabled."));
+	debug_menu->add_check_shortcut(ED_SHORTCUT("editor/sync_external_file_changes", TTRC("Synchronize External File Changes")), RUN_RELOAD_EXTERNAL);
+	debug_menu->set_item_tooltip(-1,
+			TTRC("When this option is enabled, files edited outside the editor (e.g. by an external tool) are reloaded into the running project: scripts and resources reload, and scenes are reconciled into running instances by node id.\nScripts and scenes still respect the Synchronize Script/Scene Changes options. Disabled by default."));
 	debug_menu->add_check_shortcut(ED_SHORTCUT("editor/keep_server_open", TTRC("Keep Debug Server Open")), SERVER_KEEP_OPEN);
 	debug_menu->set_item_tooltip(-1,
 			TTRC("When this option is enabled, the editor debug server will stay open and listen for new sessions started outside of the editor itself."));
@@ -196,6 +199,16 @@ void DebuggerEditorPlugin::_menu_option(int p_option) {
 			}
 
 		} break;
+		case RUN_RELOAD_EXTERNAL: {
+			bool ischecked = debug_menu->is_item_checked(debug_menu->get_item_index(RUN_RELOAD_EXTERNAL));
+			debug_menu->set_item_checked(debug_menu->get_item_index(RUN_RELOAD_EXTERNAL), !ischecked);
+
+			EditorDebuggerNode::get_singleton()->set_external_reload_enabled(!ischecked);
+			if (!initializing) {
+				EditorSettings::get_singleton()->set_project_metadata("debug_options", "run_reload_external", !ischecked);
+			}
+
+		} break;
 		case SERVER_KEEP_OPEN: {
 			bool ischecked = debug_menu->is_item_checked(debug_menu->get_item_index(SERVER_KEEP_OPEN));
 			debug_menu->set_item_checked(debug_menu->get_item_index(SERVER_KEEP_OPEN), !ischecked);
@@ -236,6 +249,7 @@ void DebuggerEditorPlugin::_update_debug_options() {
 	bool check_debug_canvas_redraw = EditorSettings::get_singleton()->get_project_metadata("debug_options", "run_debug_canvas_redraw", false);
 	bool check_live_debug = EditorSettings::get_singleton()->get_project_metadata("debug_options", "run_live_debug", true);
 	bool check_reload_scripts = EditorSettings::get_singleton()->get_project_metadata("debug_options", "run_reload_scripts", true);
+	bool check_reload_external = EditorSettings::get_singleton()->get_project_metadata("debug_options", "run_reload_external", false);
 	bool check_server_keep_open = EditorSettings::get_singleton()->get_project_metadata("debug_options", "server_keep_open", false);
 
 	if (check_deploy_remote) {
@@ -264,6 +278,9 @@ void DebuggerEditorPlugin::_update_debug_options() {
 	}
 	if (check_reload_scripts) {
 		_menu_option(RUN_RELOAD_SCRIPTS);
+	}
+	if (check_reload_external) {
+		_menu_option(RUN_RELOAD_EXTERNAL);
 	}
 	if (check_server_keep_open) {
 		_menu_option(SERVER_KEEP_OPEN);

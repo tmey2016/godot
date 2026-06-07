@@ -32,6 +32,7 @@
 
 #include "core/object/ref_counted.h"
 #include "core/string/ustring.h"
+#include "scene/debugger/scene_reconciler.h"
 
 class Array;
 class InputEvent;
@@ -95,6 +96,7 @@ private:
 	static Error _msg_live_node_prop_res(const Array &p_args);
 	static Error _msg_live_node_prop(const Array &p_args);
 	static Error _msg_reconcile_scene(const Array &p_args);
+	static Error _msg_set_external_reload_enabled(const Array &p_args);
 	static Error _msg_live_res_prop_res(const Array &p_args);
 	static Error _msg_live_res_prop(const Array &p_args);
 	static Error _msg_live_node_call(const Array &p_args);
@@ -143,10 +145,12 @@ private:
 	HashMap<String, HashSet<Node *>> live_scene_edit_cache;
 	HashMap<Node *, HashMap<ObjectID, Node *>> live_edit_remove_list;
 
-	// Per scene path: the set of explicitly stored properties per node unique id, as of the last
-	// reconciliation. Used to revert properties to their default when an override is removed from
-	// the scene file (see `_reconcile_scene_func`).
-	HashMap<String, HashMap<int32_t, HashMap<StringName, Variant>>> scene_prop_snapshots;
+	// Reconciles externally edited scenes into running instances and owns the per-scene property
+	// snapshots used for revert-to-default (see `_reconcile_scene_func`).
+	SceneReconciler scene_reconciler;
+	// Mirrors the editor's "Synchronize External File Changes" switch. When false, no external-reload
+	// bookkeeping (e.g. snapshot seeding) runs, so the feature is fully inert.
+	bool external_reload_enabled = false;
 
 	void _send_tree();
 
@@ -156,6 +160,7 @@ private:
 	void _node_set_func(int p_id, const StringName &p_prop, const Variant &p_value);
 	void _node_set_res_func(int p_id, const StringName &p_prop, const String &p_value);
 	void _reconcile_scene_func(const String &p_scene_path);
+	void _set_external_reload_enabled_func(bool p_enabled);
 	void _node_call_func(int p_id, const StringName &p_method, const Variant **p_args, int p_argcount);
 	void _res_set_func(int p_id, const StringName &p_prop, const Variant &p_value);
 	void _res_set_res_func(int p_id, const StringName &p_prop, const String &p_value);
