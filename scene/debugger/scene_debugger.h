@@ -145,11 +145,7 @@ private:
 	HashMap<String, HashSet<Node *>> live_scene_edit_cache;
 	HashMap<Node *, HashMap<ObjectID, Node *>> live_edit_remove_list;
 
-	// Reconciles externally edited scenes into running instances and owns the per-scene property
-	// snapshots used for revert-to-default (see `_reconcile_scene_func`).
 	SceneReconciler scene_reconciler;
-	// Mirrors the editor's "Synchronize External File Changes" switch. When false, no external-reload
-	// bookkeeping (e.g. snapshot seeding) runs, so the feature is fully inert.
 	bool external_reload_enabled = false;
 
 	void _send_tree();

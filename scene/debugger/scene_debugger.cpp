@@ -803,8 +803,6 @@ void SceneDebugger::add_to_cache(const String &p_filename, Node *p_node) {
 
 	if (EngineDebugger::get_script_debugger() && !p_filename.is_empty()) {
 		debugger->live_scene_edit_cache[p_filename].insert(p_node);
-		// Only when external hot reload is enabled, capture the scene's baseline overrides so a later
-		// external edit that removes one can be reverted to default. When disabled this is fully inert.
 		if (debugger->external_reload_enabled) {
 			debugger->scene_reconciler.seed_snapshot(p_filename);
 		}
