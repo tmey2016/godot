@@ -43,6 +43,7 @@ class EditorFileSystemDirectory;
 // "Synchronize Script/Scene Changes" options.
 class EditorExternalReload {
 	bool enabled = false;
+	bool session_active = false;
 	double scan_timeout = 0.0;
 	HashMap<String, uint64_t> file_modified_times;
 
@@ -52,8 +53,13 @@ public:
 	void set_enabled(bool p_enabled) { enabled = p_enabled; }
 	bool is_enabled() const { return enabled; }
 
-	// Called every frame while debugging. Throttles internally and, when enabled, scans the project
-	// for externally modified files and forwards them to the running game through `p_debugger`.
-	// No-op unless enabled.
+	// Driven by EditorDebuggerNode on session connect/disconnect. While no game is connected, polling
+	// is fully inert, so we never scan the filesystem when idle (e.g. with "Keep Debug Server Open",
+	// where the debugger node keeps processing after the game exits).
+	void set_session_active(bool p_active) { session_active = p_active; }
+
+	// Called every frame while debugging. Throttles internally and, when enabled with a game
+	// connected, scans the project for externally modified files and forwards them to the running game
+	// through `p_debugger`. No-op otherwise.
 	void poll(EditorDebuggerNode *p_debugger, double p_delta);
 };

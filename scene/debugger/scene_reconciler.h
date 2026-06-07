@@ -73,6 +73,10 @@ public:
 	// exists. Call when a scene instance is first registered.
 	void seed_snapshot(const String &p_scene_path);
 
+	// Drops all baselines. Call when the feature is disabled so a later re-enable re-seeds from the
+	// current scene state instead of diffing against a stale, pre-disable baseline.
+	void clear_snapshots() { snapshots.clear(); }
+
 	// Reloads `p_scene_path` from disk and reconciles every instance in `p_instances` against it.
 	void reconcile(const String &p_scene_path, const LocalVector<Node *> &p_instances);
 

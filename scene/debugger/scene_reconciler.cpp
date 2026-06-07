@@ -38,6 +38,7 @@
 #include "scene/main/node.h"
 #include "scene/main/scene_tree.h"
 #include "scene/main/window.h"
+#include "scene/property_utils.h"
 #include "scene/resources/packed_scene.h"
 
 namespace {
@@ -56,9 +57,11 @@ void _collect_scene_nodes_by_id(Node *p_root, Node *p_node, HashMap<int32_t, Nod
 }
 
 // Best-effort default value of a property, used to revert an override removed from the scene file.
+// Uses PropertyUtils so a script's `@export var x = ...` initializer is honored (the raw ClassDB
+// default skips the script layer, reverting script-exported properties to the wrong value).
 Variant _scene_property_default(Node *p_node, const StringName &p_prop) {
 	bool valid = false;
-	const Variant def = ClassDB::class_get_default_property_value(p_node->get_class_name(), p_prop, &valid);
+	const Variant def = PropertyUtils::get_property_default_value(p_node, p_prop, &valid);
 	if (valid) {
 		return def;
 	}
@@ -78,6 +81,25 @@ Callable _make_connection_callable(Node *p_target, const SceneReconciler::Connec
 		callable = callable.unbind(p_conn.unbinds);
 	}
 	return callable;
+}
+
+// Find an existing connection of `p_signal` on `p_source` whose callable targets `p_method` on
+// `p_target`, ignoring bound-argument equality. A rebuilt bound Callable may not compare equal to the
+// one created at instantiation, so matching on (target, method) avoids both duplicate connects (a
+// missed is_connected()) and leaked connections (a failed disconnect()). The connection key already
+// treats source|signal|target|method as the identity, so this matches that granularity.
+bool _find_signal_connection(Node *p_source, const StringName &p_signal, const Object *p_target, const StringName &p_method, Callable *r_callable = nullptr) {
+	List<Object::Connection> conns;
+	p_source->get_signal_connection_list(p_signal, &conns);
+	for (const Object::Connection &c : conns) {
+		if (c.callable.get_object() == p_target && c.callable.get_method() == p_method) {
+			if (r_callable) {
+				*r_callable = c.callable;
+			}
+			return true;
+		}
+	}
+	return false;
 }
 
 void _apply_node_properties(Node *p_node, const HashMap<StringName, Variant> &p_props) {
@@ -102,8 +124,25 @@ struct DesiredNode {
 	StringName name;
 	StringName type;
 	Ref<PackedScene> instance;
-	int sibling_index = 0;
+	NodePath parent_path; // Authored parent path; fallback when the parent carries no unique id.
 };
+
+// Resolve the live parent for a desired node: prefer its unique id, fall back to its authored path so
+// an id'd node whose parent has no unique id (e.g. under a nested foreign instance) can still be
+// created/reparented. Returns nullptr if the parent can't be located.
+Node *_resolve_desired_parent(const DesiredNode &p_dn, Node *p_instance_root, int32_t p_root_id, const HashMap<int32_t, Node *> &p_live) {
+	if (p_dn.parent_id == p_root_id) {
+		return p_instance_root;
+	}
+	if (p_dn.parent_id != Node::UNIQUE_SCENE_ID_UNASSIGNED) {
+		Node *const *n = p_live.getptr(p_dn.parent_id);
+		return n ? *n : nullptr; // Parent has an id but isn't live; don't guess by path.
+	}
+	if (!p_dn.parent_path.is_empty()) {
+		return p_instance_root->get_node_or_null(p_dn.parent_path);
+	}
+	return nullptr;
+}
 
 // A node without a unique id: reconciled best-effort by path (properties and groups only).
 struct UnassignedNode {
@@ -177,7 +216,6 @@ SceneReconciler::SceneSnapshot SceneReconciler::reconcile_against_state(const Lo
 
 	LocalVector<DesiredNode> desired; // Parents before children.
 	HashMap<int32_t, uint32_t> desired_index;
-	HashMap<int32_t, int> sibling_counter;
 	LocalVector<UnassignedNode> unassigned;
 	for (int i = 0; i < node_count; i++) {
 		const int32_t id = p_state->get_node_unique_id(i);
@@ -201,14 +239,11 @@ SceneReconciler::SceneSnapshot SceneReconciler::reconcile_against_state(const Lo
 		dn.type = p_state->get_node_type(i);
 		dn.instance = p_state->get_node_instance(i);
 		if (!dn.is_root) {
-			const NodePath parent_path = p_state->get_node_path(i, true);
-			if (path_to_id.has(parent_path)) {
-				dn.parent_id = path_to_id[parent_path];
+			dn.parent_path = p_state->get_node_path(i, true);
+			if (path_to_id.has(dn.parent_path)) {
+				dn.parent_id = path_to_id[dn.parent_path];
 			}
 		}
-		int *cnt = sibling_counter.getptr(dn.parent_id);
-		dn.sibling_index = cnt ? *cnt : 0;
-		sibling_counter[dn.parent_id] = dn.sibling_index + 1;
 
 		desired_index[id] = desired.size();
 		desired.push_back(dn);
@@ -257,7 +292,7 @@ SceneReconciler::SceneSnapshot SceneReconciler::reconcile_against_state(const Lo
 			if (dn.is_root || live.has(dn.id)) {
 				continue;
 			}
-			Node *parent = (dn.parent_id == root_id) ? instance_root : (live.has(dn.parent_id) ? live[dn.parent_id] : nullptr);
+			Node *parent = _resolve_desired_parent(dn, instance_root, root_id, live);
 			if (!parent) {
 				continue;
 			}
@@ -274,12 +309,8 @@ SceneReconciler::SceneSnapshot SceneReconciler::reconcile_against_state(const Lo
 			parent->add_child(node);
 			node->set_owner(instance_root);
 			node->set_unique_scene_id(dn.id);
-			if (const HashMap<StringName, Variant> *props = new_snapshot.node_props.getptr(dn.id)) {
-				_apply_node_properties(node, *props);
-			}
-			if (const HashSet<StringName> *groups = new_snapshot.node_groups.getptr(dn.id)) {
-				_apply_node_groups(node, *groups);
-			}
+			// Properties and groups are applied uniformly in pass 4 (this node is now in `live`).
+			// Applying them here too would double-fire non-idempotent setters on a single add.
 			live[dn.id] = node;
 		}
 
@@ -293,7 +324,7 @@ SceneReconciler::SceneSnapshot SceneReconciler::reconcile_against_state(const Lo
 				continue;
 			}
 			Node *node = live[dn.id];
-			Node *want_parent = (dn.parent_id == root_id) ? instance_root : (live.has(dn.parent_id) ? live[dn.parent_id] : nullptr);
+			Node *want_parent = _resolve_desired_parent(dn, instance_root, root_id, live);
 			if (want_parent && node->get_parent() != want_parent) {
 				node->reparent(want_parent, false);
 			}
@@ -359,18 +390,33 @@ SceneReconciler::SceneSnapshot SceneReconciler::reconcile_against_state(const Lo
 		}
 
 		// 5) Reorder siblings to match the scene's child order. Skipped for inherited scenes (the
-		// sibling order in this state may not account for inherited base nodes).
-		for (const DesiredNode &dn : desired) {
-			if (!allow_structural_changes) {
-				break;
+		// sibling order in this state may not account for inherited base nodes). A parent may also hold
+		// id-less or pending-free children, so the desired sibling index (a dense rank over id'd nodes)
+		// can't be used as an absolute live child index. Instead, reorder the id'd children *within the
+		// slots they already occupy*: collect their current indices, sort them, and reassign them to
+		// the id'd children in desired (file) order. This leaves id-less/pending-free siblings in place.
+		if (allow_structural_changes) {
+			HashMap<Node *, LocalVector<Node *>> ordered_children; // parent -> id'd children, file order.
+			for (const DesiredNode &dn : desired) {
+				if (dn.is_root || !live.has(dn.id)) {
+					continue;
+				}
+				Node *node = live[dn.id];
+				if (Node *parent = node->get_parent()) {
+					ordered_children[parent].push_back(node);
+				}
 			}
-			if (dn.is_root || !live.has(dn.id)) {
-				continue;
-			}
-			Node *node = live[dn.id];
-			Node *parent = node->get_parent();
-			if (parent && dn.sibling_index < parent->get_child_count()) {
-				parent->move_child(node, dn.sibling_index);
+			for (const KeyValue<Node *, LocalVector<Node *>> &kv : ordered_children) {
+				LocalVector<int> slots;
+				for (Node *n : kv.value) {
+					slots.push_back(n->get_index());
+				}
+				slots.sort();
+				for (uint32_t k = 0; k < kv.value.size(); k++) {
+					if (kv.value[k]->get_index() != slots[k]) {
+						kv.key->move_child(kv.value[k], slots[k]);
+					}
+				}
 			}
 		}
 
@@ -385,15 +431,17 @@ SceneReconciler::SceneSnapshot SceneReconciler::reconcile_against_state(const Lo
 		}
 
 		// 7) Reconcile persistent signal connections: connect new ones, disconnect removed ones.
+		// Identity is matched on (target, method) rather than full Callable equality, since a rebuilt
+		// bound Callable may not compare equal to the one made at instantiation (see
+		// `_find_signal_connection`).
 		for (const KeyValue<String, ConnectionInfo> &kv : new_snapshot.connections) {
 			Node *source = instance_root->get_node_or_null(kv.value.source);
 			Node *target = instance_root->get_node_or_null(kv.value.target);
 			if (!source || !target) {
 				continue;
 			}
-			const Callable callable = _make_connection_callable(target, kv.value);
-			if (!source->is_connected(kv.value.signal, callable)) {
-				source->connect(kv.value.signal, callable, kv.value.flags);
+			if (!_find_signal_connection(source, kv.value.signal, target, kv.value.method)) {
+				source->connect(kv.value.signal, _make_connection_callable(target, kv.value), kv.value.flags);
 			}
 		}
 		for (const KeyValue<String, ConnectionInfo> &kv : p_previous.connections) {
@@ -405,9 +453,9 @@ SceneReconciler::SceneSnapshot SceneReconciler::reconcile_against_state(const Lo
 			if (!source || !target) {
 				continue;
 			}
-			const Callable callable = _make_connection_callable(target, kv.value);
-			if (source->is_connected(kv.value.signal, callable)) {
-				source->disconnect(kv.value.signal, callable);
+			Callable existing;
+			if (_find_signal_connection(source, kv.value.signal, target, kv.value.method, &existing)) {
+				source->disconnect(kv.value.signal, existing);
 			}
 		}
 	}

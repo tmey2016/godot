@@ -960,6 +960,10 @@ void LiveEditor::_set_external_reload_enabled_func(bool p_enabled) {
 		for (const KeyValue<String, HashSet<Node *>> &kv : live_scene_edit_cache) {
 			scene_reconciler.seed_snapshot(kv.key);
 		}
+	} else {
+		// Drop stale baselines. seed_snapshot() is a no-op when a snapshot already exists, so without
+		// this a disable -> external edit -> re-enable cycle would diff against an out-of-date baseline.
+		scene_reconciler.clear_snapshots();
 	}
 }
 

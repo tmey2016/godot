@@ -441,8 +441,10 @@ void EditorDebuggerNode::_notification(int p_what) {
 
 				debugger->update_live_edit_root();
 				// Tell the freshly connected game whether external hot reload is enabled, so its
-				// game-side bookkeeping matches the editor's switch.
+				// game-side bookkeeping matches the editor's switch, and start polling for it (the
+				// poll is inert until a session is connected; see EditorExternalReload).
 				debugger->set_external_reload_enabled(external_reload.is_enabled());
+				external_reload.set_session_active(true);
 			}
 		} break;
 	}
@@ -505,6 +507,8 @@ void EditorDebuggerNode::_debugger_stopped(int p_id) {
 			found = true;
 		}
 	});
+	// Stop polling for external file changes once the last game session is gone.
+	external_reload.set_session_active(found);
 	if (!found) {
 		EditorRunBar::get_singleton()->get_pause_button()->set_pressed(false);
 		EditorRunBar::get_singleton()->get_pause_button()->set_disabled(true);

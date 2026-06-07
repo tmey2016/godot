@@ -36,7 +36,10 @@
 #include "editor/script/script_editor_plugin.h"
 
 void EditorExternalReload::poll(EditorDebuggerNode *p_debugger, double p_delta) {
-	if (!enabled || !p_debugger) {
+	// `session_active` is toggled by EditorDebuggerNode on connect/disconnect, so we never scan the
+	// filesystem while no game is connected (e.g. with "Keep Debug Server Open" the debugger node
+	// keeps processing after the game exits).
+	if (!enabled || !session_active || !p_debugger) {
 		return;
 	}
 
