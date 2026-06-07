@@ -38,6 +38,7 @@ class Button;
 class DebugAdapterParser;
 class EditorDebuggerPlugin;
 class EditorDebuggerTree;
+class EditorFileSystemDirectory;
 class EditorDebuggerRemoteObjects;
 class MenuButton;
 class ScriptEditorDebugger;
@@ -112,7 +113,7 @@ private:
 	// that files edited outside the editor reload in the running game without needing the
 	// editor to regain focus.
 	float external_reload_scan_timeout = 0.0;
-	HashMap<String, uint64_t> edited_scene_modified_times;
+	HashMap<String, uint64_t> scene_modified_times;
 	bool auto_switch_remote_scene_tree = false;
 	bool debug_with_external_editor = false;
 	bool keep_open = false;
@@ -129,7 +130,8 @@ private:
 	void _update_errors();
 	void _update_margins();
 	void _filesystem_resources_reloaded(const PackedStringArray &p_resources);
-	void _sync_edited_scene_if_changed();
+	void _sync_changed_scenes();
+	void _collect_changed_scenes(EditorFileSystemDirectory *p_dir, PackedStringArray &r_changed);
 	void _sync_scene_to_running_game(const String &p_scene_path);
 
 	friend class DebuggerEditorPlugin;
@@ -221,7 +223,7 @@ public:
 	void live_debug_restore_node(ObjectID p_id, const NodePath &p_at, int p_at_pos);
 	void live_debug_duplicate_node(const NodePath &p_at, const String &p_new_name);
 	void live_debug_reparent_node(const NodePath &p_at, const NodePath &p_new_place, const String &p_new_name, int p_at_pos);
-	void live_set_node_property(const NodePath &p_path, const StringName &p_property, const Variant &p_value);
+	void live_set_scene_node_property(const String &p_scene_path, const NodePath &p_node_path, const StringName &p_property, const Variant &p_value);
 
 	void set_debug_mute_audio(bool p_mute);
 	bool get_debug_mute_audio() const;

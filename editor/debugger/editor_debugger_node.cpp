@@ -385,7 +385,7 @@ void EditorDebuggerNode::_notification(int p_what) {
 				// Matches the editor's own background `scan_changes_timer` cadence.
 				external_reload_scan_timeout = 0.5;
 				EditorFileSystem::get_singleton()->scan_changes();
-				_sync_edited_scene_if_changed();
+				_sync_changed_scenes();
 			}
 
 			// Remote scene tree update.
@@ -736,33 +736,55 @@ void EditorDebuggerNode::_filesystem_resources_reloaded(const PackedStringArray 
 	// Scenes and other resources are reloaded from disk in the running game so that new instances
 	// and shared resources (materials, etc.) pick up the changes. Note: the currently edited
 	// scene is not kept in the editor's resource cache, so it never reaches this signal; it is
-	// handled instead by `_sync_edited_scene_if_changed()`.
+	// handled instead by `_sync_changed_scenes()`.
 	if (!cached_files.is_empty()) {
 		reload_cached_files(cached_files);
 	}
 }
 
-void EditorDebuggerNode::_sync_edited_scene_if_changed() {
-	// The currently edited scene is not retained in the editor's resource cache, so external
-	// edits to it are not reported through `resources_reload`. Detect changes by modification
-	// time and push the new on-disk property values to the running instance as live edits.
-	Node *edited_scene = EditorNode::get_singleton()->get_edited_scene();
-	if (!edited_scene) {
+void EditorDebuggerNode::_sync_changed_scenes() {
+	// Scene files are not retained in the editor's resource cache, so external edits to them are
+	// not reported through `resources_reload`. Detect changes by modification time and, for every
+	// scene the game is running (whether or not it is open in the editor), reload the cached
+	// `PackedScene` (for future instantiations) and live-update any already running instances.
+	EditorFileSystem *efs = EditorFileSystem::get_singleton();
+	if (!efs) {
 		return;
 	}
 
-	const String path = edited_scene->get_scene_file_path();
-	if (path.is_empty()) {
+	PackedStringArray changed_scenes;
+	_collect_changed_scenes(efs->get_filesystem(), changed_scenes);
+	if (changed_scenes.is_empty()) {
 		return;
 	}
 
-	const uint64_t modified_time = FileAccess::get_modified_time(path);
-	const uint64_t *last_modified_time = edited_scene_modified_times.getptr(path);
-	const bool changed = last_modified_time && *last_modified_time != modified_time;
-	edited_scene_modified_times[path] = modified_time;
-
-	if (changed) {
+	reload_cached_files(changed_scenes);
+	for (const String &path : changed_scenes) {
 		_sync_scene_to_running_game(path);
+	}
+}
+
+void EditorDebuggerNode::_collect_changed_scenes(EditorFileSystemDirectory *p_dir, PackedStringArray &r_changed) {
+	if (!p_dir) {
+		return;
+	}
+
+	for (int i = 0; i < p_dir->get_file_count(); i++) {
+		if (p_dir->get_file_type(i) != SNAME("PackedScene")) {
+			continue;
+		}
+
+		const String path = p_dir->get_file_path(i);
+		const uint64_t modified_time = FileAccess::get_modified_time(path);
+		const uint64_t *last_modified_time = scene_modified_times.getptr(path);
+		if (last_modified_time && *last_modified_time != modified_time) {
+			r_changed.push_back(path);
+		}
+		scene_modified_times[path] = modified_time;
+	}
+
+	for (int i = 0; i < p_dir->get_subdir_count(); i++) {
+		_collect_changed_scenes(p_dir->get_subdir(i), r_changed);
 	}
 }
 
@@ -786,7 +808,7 @@ void EditorDebuggerNode::_sync_scene_to_running_game(const String &p_scene_path)
 		const NodePath node_path = state->get_node_path(node);
 		const int property_count = state->get_node_property_count(node);
 		for (int prop = 0; prop < property_count; prop++) {
-			live_set_node_property(node_path, state->get_node_property_name(node, prop), state->get_node_property_value(node, prop));
+			live_set_scene_node_property(p_scene_path, node_path, state->get_node_property_name(node, prop), state->get_node_property_value(node, prop));
 		}
 	}
 }
@@ -1007,9 +1029,9 @@ void EditorDebuggerNode::live_debug_reparent_node(const NodePath &p_at, const No
 	});
 }
 
-void EditorDebuggerNode::live_set_node_property(const NodePath &p_path, const StringName &p_property, const Variant &p_value) {
+void EditorDebuggerNode::live_set_scene_node_property(const String &p_scene_path, const NodePath &p_node_path, const StringName &p_property, const Variant &p_value) {
 	_for_all(tabs, [&](ScriptEditorDebugger *dbg) {
-		dbg->live_set_node_property(p_path, p_property, p_value);
+		dbg->live_set_scene_node_property(p_scene_path, p_node_path, p_property, p_value);
 	});
 }
 

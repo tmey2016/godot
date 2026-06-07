@@ -350,6 +350,18 @@ Error SceneDebugger::_msg_live_node_prop(const Array &p_args) {
 	return OK;
 }
 
+Error SceneDebugger::_msg_live_scene_node_prop_res(const Array &p_args) {
+	ERR_FAIL_COND_V(p_args.size() < 4, ERR_INVALID_DATA);
+	LiveEditor::get_singleton()->_scene_node_set_res_func(p_args[0], p_args[1], p_args[2], p_args[3]);
+	return OK;
+}
+
+Error SceneDebugger::_msg_live_scene_node_prop(const Array &p_args) {
+	ERR_FAIL_COND_V(p_args.size() < 4, ERR_INVALID_DATA);
+	LiveEditor::get_singleton()->_scene_node_set_func(p_args[0], p_args[1], p_args[2], p_args[3]);
+	return OK;
+}
+
 Error SceneDebugger::_msg_live_res_prop_res(const Array &p_args) {
 	ERR_FAIL_COND_V(p_args.size() < 3, ERR_INVALID_DATA);
 	LiveEditor::get_singleton()->_res_set_res_func(p_args[0], p_args[1], p_args[2]);
@@ -636,6 +648,8 @@ void SceneDebugger::_init_message_handlers() {
 	message_handlers["live_res_path"] = _msg_live_res_path;
 	message_handlers["live_node_prop_res"] = _msg_live_node_prop_res;
 	message_handlers["live_node_prop"] = _msg_live_node_prop;
+	message_handlers["live_scene_node_prop_res"] = _msg_live_scene_node_prop_res;
+	message_handlers["live_scene_node_prop"] = _msg_live_scene_node_prop;
 	message_handlers["live_res_prop_res"] = _msg_live_res_prop_res;
 	message_handlers["live_res_prop"] = _msg_live_res_prop;
 	message_handlers["live_node_call"] = _msg_live_node_call;
@@ -917,6 +931,67 @@ void LiveEditor::_node_set_func(int p_id, const StringName &p_prop, const Varian
 			}
 		}
 	}
+}
+
+void LiveEditor::_scene_node_set_func(const String &p_scene_path, const NodePath &p_node, const StringName &p_prop, const Variant &p_value) {
+	SceneTree *scene_tree = SceneTree::get_singleton();
+	if (!scene_tree) {
+		return;
+	}
+
+	// Unlike `_node_set_func()`, the target scene is addressed explicitly by path rather than the
+	// single "current" live-edit scene, so this also updates scenes that are running but not open
+	// in the editor.
+	HashMap<String, HashSet<Node *>>::Iterator E = live_scene_edit_cache.find(p_scene_path);
+	if (!E) {
+		return; // Scene not instantiated in the running game.
+	}
+
+	for (Node *F : E->value) {
+		Node *n = F;
+
+		if (!n->has_node(p_node)) {
+			continue;
+		}
+		Node *n2 = n->get_node(p_node);
+
+		// Do not change the transform of an instance root, unless it's the scene being played.
+		// Mirrors `_node_set_func()`; see GH-86659 for additional context.
+		bool keep_transform = (n2 == n) && (n2->get_parent() != scene_tree->root);
+		Variant orig_tf;
+
+		if (keep_transform) {
+			if (n2->is_class("Node3D")) {
+				orig_tf = n2->call("get_transform");
+			} else if (n2->is_class("CanvasItem")) {
+				orig_tf = n2->call("_edit_get_state");
+			}
+		}
+
+		n2->set(p_prop, p_value);
+
+		if (keep_transform) {
+			if (n2->is_class("Node3D")) {
+				Variant new_tf = n2->call("get_transform");
+				if (new_tf != orig_tf) {
+					n2->call("set_transform", orig_tf);
+				}
+			} else if (n2->is_class("CanvasItem")) {
+				Variant new_tf = n2->call("_edit_get_state");
+				if (new_tf != orig_tf) {
+					n2->call("_edit_set_state", orig_tf);
+				}
+			}
+		}
+	}
+}
+
+void LiveEditor::_scene_node_set_res_func(const String &p_scene_path, const NodePath &p_node, const StringName &p_prop, const String &p_value) {
+	Ref<Resource> r = ResourceLoader::load(p_value);
+	if (r.is_null()) {
+		return;
+	}
+	_scene_node_set_func(p_scene_path, p_node, p_prop, r);
 }
 
 void LiveEditor::_node_set_res_func(int p_id, const StringName &p_prop, const String &p_value) {
