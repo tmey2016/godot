@@ -1551,22 +1551,13 @@ void ScriptEditorDebugger::_property_changed(Object *p_base, const StringName &p
 	}
 }
 
-void ScriptEditorDebugger::live_set_scene_node_property(const String &p_scene_path, const NodePath &p_node_path, const StringName &p_property, const Variant &p_value) {
+void ScriptEditorDebugger::reconcile_scene(const String &p_scene_path) {
 	if (!live_debug) {
 		return;
 	}
 
-	if (p_value.is_ref_counted()) {
-		Ref<Resource> res = p_value;
-		if (res.is_valid() && !res->get_path().is_empty()) {
-			Array msg = { p_scene_path, p_node_path, p_property, res->get_path() };
-			_put_msg("scene:live_scene_node_prop_res", msg);
-			return;
-		}
-	}
-
-	Array msg = { p_scene_path, p_node_path, p_property, p_value };
-	_put_msg("scene:live_scene_node_prop", msg);
+	Array msg = { p_scene_path };
+	_put_msg("scene:reconcile_scene", msg);
 }
 
 bool ScriptEditorDebugger::is_move_to_foreground() const {

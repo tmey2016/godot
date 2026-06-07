@@ -94,8 +94,7 @@ private:
 	static Error _msg_live_res_path(const Array &p_args);
 	static Error _msg_live_node_prop_res(const Array &p_args);
 	static Error _msg_live_node_prop(const Array &p_args);
-	static Error _msg_live_scene_node_prop_res(const Array &p_args);
-	static Error _msg_live_scene_node_prop(const Array &p_args);
+	static Error _msg_reconcile_scene(const Array &p_args);
 	static Error _msg_live_res_prop_res(const Array &p_args);
 	static Error _msg_live_res_prop(const Array &p_args);
 	static Error _msg_live_node_call(const Array &p_args);
@@ -144,6 +143,11 @@ private:
 	HashMap<String, HashSet<Node *>> live_scene_edit_cache;
 	HashMap<Node *, HashMap<ObjectID, Node *>> live_edit_remove_list;
 
+	// Per scene path: the set of explicitly stored properties per node unique id, as of the last
+	// reconciliation. Used to revert properties to their default when an override is removed from
+	// the scene file (see `_reconcile_scene_func`).
+	HashMap<String, HashMap<int32_t, HashMap<StringName, Variant>>> scene_prop_snapshots;
+
 	void _send_tree();
 
 	void _node_path_func(const NodePath &p_path, int p_id);
@@ -151,8 +155,7 @@ private:
 
 	void _node_set_func(int p_id, const StringName &p_prop, const Variant &p_value);
 	void _node_set_res_func(int p_id, const StringName &p_prop, const String &p_value);
-	void _scene_node_set_func(const String &p_scene_path, const NodePath &p_node, const StringName &p_prop, const Variant &p_value);
-	void _scene_node_set_res_func(const String &p_scene_path, const NodePath &p_node, const StringName &p_prop, const String &p_value);
+	void _reconcile_scene_func(const String &p_scene_path);
 	void _node_call_func(int p_id, const StringName &p_method, const Variant **p_args, int p_argcount);
 	void _res_set_func(int p_id, const StringName &p_prop, const Variant &p_value);
 	void _res_set_res_func(int p_id, const StringName &p_prop, const String &p_value);

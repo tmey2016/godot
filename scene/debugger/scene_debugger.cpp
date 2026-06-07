@@ -350,15 +350,9 @@ Error SceneDebugger::_msg_live_node_prop(const Array &p_args) {
 	return OK;
 }
 
-Error SceneDebugger::_msg_live_scene_node_prop_res(const Array &p_args) {
-	ERR_FAIL_COND_V(p_args.size() < 4, ERR_INVALID_DATA);
-	LiveEditor::get_singleton()->_scene_node_set_res_func(p_args[0], p_args[1], p_args[2], p_args[3]);
-	return OK;
-}
-
-Error SceneDebugger::_msg_live_scene_node_prop(const Array &p_args) {
-	ERR_FAIL_COND_V(p_args.size() < 4, ERR_INVALID_DATA);
-	LiveEditor::get_singleton()->_scene_node_set_func(p_args[0], p_args[1], p_args[2], p_args[3]);
+Error SceneDebugger::_msg_reconcile_scene(const Array &p_args) {
+	ERR_FAIL_COND_V(p_args.is_empty(), ERR_INVALID_DATA);
+	LiveEditor::get_singleton()->_reconcile_scene_func(p_args[0]);
 	return OK;
 }
 
@@ -648,8 +642,7 @@ void SceneDebugger::_init_message_handlers() {
 	message_handlers["live_res_path"] = _msg_live_res_path;
 	message_handlers["live_node_prop_res"] = _msg_live_node_prop_res;
 	message_handlers["live_node_prop"] = _msg_live_node_prop;
-	message_handlers["live_scene_node_prop_res"] = _msg_live_scene_node_prop_res;
-	message_handlers["live_scene_node_prop"] = _msg_live_scene_node_prop;
+	message_handlers["reconcile_scene"] = _msg_reconcile_scene;
 	message_handlers["live_res_prop_res"] = _msg_live_res_prop_res;
 	message_handlers["live_res_prop"] = _msg_live_res_prop;
 	message_handlers["live_node_call"] = _msg_live_node_call;
@@ -802,6 +795,30 @@ void SceneDebugger::add_to_cache(const String &p_filename, Node *p_node) {
 
 	if (EngineDebugger::get_script_debugger() && !p_filename.is_empty()) {
 		debugger->live_scene_edit_cache[p_filename].insert(p_node);
+
+		// Seed the property snapshot from the scene as first instantiated, so the first external
+		// edit that removes an override can correctly revert it to default (see `_reconcile_scene_func`).
+		if (!debugger->scene_prop_snapshots.has(p_filename)) {
+			Ref<PackedScene> ps = ResourceCache::get_ref(p_filename);
+			if (ps.is_valid()) {
+				Ref<SceneState> st = ps->get_state();
+				if (st.is_valid()) {
+					HashMap<int32_t, HashMap<StringName, Variant>> snap;
+					for (int i = 0; i < st->get_node_count(); i++) {
+						const int32_t id = st->get_node_unique_id(i);
+						if (id == Node::UNIQUE_SCENE_ID_UNASSIGNED) {
+							continue;
+						}
+						HashMap<StringName, Variant> props;
+						for (int j = 0; j < st->get_node_property_count(i); j++) {
+							props[st->get_node_property_name(i, j)] = st->get_node_property_value(i, j);
+						}
+						snap[id] = props;
+					}
+					debugger->scene_prop_snapshots[p_filename] = snap;
+				}
+			}
+		}
 	}
 }
 
@@ -933,65 +950,243 @@ void LiveEditor::_node_set_func(int p_id, const StringName &p_prop, const Varian
 	}
 }
 
-void LiveEditor::_scene_node_set_func(const String &p_scene_path, const NodePath &p_node, const StringName &p_prop, const Variant &p_value) {
+namespace {
+// Collect every node belonging to the instance rooted at `p_root` (the root itself and nodes
+// owned by it) that carries a unique scene id, mapping id -> node.
+void _collect_scene_nodes_by_id(Node *p_root, Node *p_node, HashMap<int32_t, Node *> &r_map) {
+	if (p_node == p_root || p_node->get_owner() == p_root) {
+		const int32_t id = p_node->get_unique_scene_id();
+		if (id != Node::UNIQUE_SCENE_ID_UNASSIGNED) {
+			r_map[id] = p_node;
+		}
+	}
+	for (int i = 0; i < p_node->get_child_count(); i++) {
+		_collect_scene_nodes_by_id(p_root, p_node->get_child(i), r_map);
+	}
+}
+
+// Best-effort default value of a property, used to revert an override removed from the scene file.
+Variant _scene_property_default(Node *p_node, const StringName &p_prop) {
+	bool valid = false;
+	const Variant def = ClassDB::class_get_default_property_value(p_node->get_class_name(), p_prop, &valid);
+	if (valid) {
+		return def;
+	}
+	if (p_node->property_can_revert(p_prop)) {
+		return p_node->property_get_revert(p_prop);
+	}
+	return Variant();
+}
+
+struct DesiredNode {
+	int32_t id = Node::UNIQUE_SCENE_ID_UNASSIGNED;
+	int32_t parent_id = Node::UNIQUE_SCENE_ID_UNASSIGNED;
+	bool is_root = false;
+	StringName name;
+	StringName type;
+	Ref<PackedScene> instance;
+	int sibling_index = 0;
+	HashMap<StringName, Variant> props;
+};
+} // namespace
+
+void LiveEditor::_reconcile_scene_func(const String &p_scene_path) {
 	SceneTree *scene_tree = SceneTree::get_singleton();
 	if (!scene_tree) {
 		return;
 	}
 
-	// Unlike `_node_set_func()`, the target scene is addressed explicitly by path rather than the
-	// single "current" live-edit scene, so this also updates scenes that are running but not open
-	// in the editor.
 	HashMap<String, HashSet<Node *>>::Iterator E = live_scene_edit_cache.find(p_scene_path);
 	if (!E) {
 		return; // Scene not instantiated in the running game.
 	}
 
-	for (Node *F : E->value) {
-		Node *n = F;
-
-		if (!n->has_node(p_node)) {
-			continue;
-		}
-		Node *n2 = n->get_node(p_node);
-
-		// Do not change the transform of an instance root, unless it's the scene being played.
-		// Mirrors `_node_set_func()`; see GH-86659 for additional context.
-		bool keep_transform = (n2 == n) && (n2->get_parent() != scene_tree->root);
-		Variant orig_tf;
-
-		if (keep_transform) {
-			if (n2->is_class("Node3D")) {
-				orig_tf = n2->call("get_transform");
-			} else if (n2->is_class("CanvasItem")) {
-				orig_tf = n2->call("_edit_get_state");
-			}
-		}
-
-		n2->set(p_prop, p_value);
-
-		if (keep_transform) {
-			if (n2->is_class("Node3D")) {
-				Variant new_tf = n2->call("get_transform");
-				if (new_tf != orig_tf) {
-					n2->call("set_transform", orig_tf);
-				}
-			} else if (n2->is_class("CanvasItem")) {
-				Variant new_tf = n2->call("_edit_get_state");
-				if (new_tf != orig_tf) {
-					n2->call("_edit_set_state", orig_tf);
-				}
-			}
-		}
+	// Refresh the PackedScene from disk so we reconcile against the latest on-disk state.
+	Ref<PackedScene> packed_scene = ResourceCache::get_ref(p_scene_path);
+	if (packed_scene.is_valid()) {
+		packed_scene->reload_from_file();
+	} else {
+		packed_scene = ResourceLoader::load(p_scene_path, "PackedScene", ResourceFormatLoader::CACHE_MODE_IGNORE);
 	}
-}
-
-void LiveEditor::_scene_node_set_res_func(const String &p_scene_path, const NodePath &p_node, const StringName &p_prop, const String &p_value) {
-	Ref<Resource> r = ResourceLoader::load(p_value);
-	if (r.is_null()) {
+	if (packed_scene.is_null()) {
 		return;
 	}
-	_scene_node_set_func(p_scene_path, p_node, p_prop, r);
+	Ref<SceneState> state = packed_scene->get_state();
+	if (state.is_null()) {
+		return;
+	}
+
+	const int node_count = state->get_node_count();
+	if (node_count == 0) {
+		return;
+	}
+
+	// Build the desired structure (keyed by unique id) from the new scene state.
+	HashMap<NodePath, int32_t> path_to_id;
+	for (int i = 0; i < node_count; i++) {
+		path_to_id[state->get_node_path(i)] = state->get_node_unique_id(i);
+	}
+
+	LocalVector<DesiredNode> desired; // In scene order, i.e. parents before children.
+	HashMap<int32_t, uint32_t> desired_index;
+	HashMap<int32_t, int> sibling_counter;
+	for (int i = 0; i < node_count; i++) {
+		const int32_t id = state->get_node_unique_id(i);
+		if (id == Node::UNIQUE_SCENE_ID_UNASSIGNED) {
+			continue; // Nodes without a stable id cannot be tracked across edits.
+		}
+
+		DesiredNode dn;
+		dn.id = id;
+		dn.is_root = (i == 0);
+		dn.name = state->get_node_name(i);
+		dn.type = state->get_node_type(i);
+		dn.instance = state->get_node_instance(i);
+		if (!dn.is_root) {
+			const NodePath parent_path = state->get_node_path(i, true);
+			if (path_to_id.has(parent_path)) {
+				dn.parent_id = path_to_id[parent_path];
+			}
+		}
+		int *cnt = sibling_counter.getptr(dn.parent_id);
+		dn.sibling_index = cnt ? *cnt : 0;
+		sibling_counter[dn.parent_id] = dn.sibling_index + 1;
+
+		const int prop_count = state->get_node_property_count(i);
+		for (int j = 0; j < prop_count; j++) {
+			dn.props[state->get_node_property_name(i, j)] = state->get_node_property_value(i, j);
+		}
+
+		desired_index[id] = desired.size();
+		desired.push_back(dn);
+	}
+
+	// `snapshot` holds the previously applied overrides; it is read for revert-to-default below and
+	// rebuilt at the end. Read it now (before the per-instance loop) so all instances revert against
+	// the same previous state.
+	HashMap<int32_t, HashMap<StringName, Variant>> &snapshot = scene_prop_snapshots[p_scene_path];
+
+	LocalVector<Node *> instances;
+	for (Node *n : E->value) {
+		instances.push_back(n);
+	}
+
+	for (Node *instance_root : instances) {
+		HashMap<int32_t, Node *> live;
+		_collect_scene_nodes_by_id(instance_root, instance_root, live);
+		const int32_t root_id = instance_root->get_unique_scene_id();
+
+		// 1) Remove nodes that no longer exist (only subtree roots; children go with their parent).
+		LocalVector<Node *> to_remove;
+		for (const KeyValue<int32_t, Node *> &kv : live) {
+			if (kv.key == root_id || desired_index.has(kv.key)) {
+				continue;
+			}
+			bool ancestor_removed = false;
+			for (Node *p = kv.value->get_parent(); p && p != instance_root; p = p->get_parent()) {
+				const int32_t pid = p->get_unique_scene_id();
+				if (pid != Node::UNIQUE_SCENE_ID_UNASSIGNED && live.has(pid) && !desired_index.has(pid)) {
+					ancestor_removed = true;
+					break;
+				}
+			}
+			if (!ancestor_removed) {
+				to_remove.push_back(kv.value);
+			}
+		}
+		for (Node *n : to_remove) {
+			live.erase(n->get_unique_scene_id());
+			n->queue_free();
+		}
+
+		// 2) Add new nodes (desired is parent-first, so parents are created before their children).
+		for (const DesiredNode &dn : desired) {
+			if (dn.is_root || live.has(dn.id)) {
+				continue;
+			}
+			Node *parent = (dn.parent_id == root_id) ? instance_root : (live.has(dn.parent_id) ? live[dn.parent_id] : nullptr);
+			if (!parent) {
+				continue;
+			}
+			Node *node = nullptr;
+			if (dn.instance.is_valid()) {
+				node = dn.instance->instantiate();
+			} else if (!String(dn.type).is_empty()) {
+				node = Object::cast_to<Node>(ClassDB::instantiate(dn.type));
+			}
+			if (!node) {
+				continue;
+			}
+			node->set_name(dn.name);
+			parent->add_child(node);
+			node->set_owner(instance_root);
+			node->set_unique_scene_id(dn.id);
+			for (const KeyValue<StringName, Variant> &p : dn.props) {
+				node->set(p.key, p.value);
+			}
+			live[dn.id] = node;
+		}
+
+		// 3) Reparent / rename existing nodes whose place in the tree changed.
+		for (const DesiredNode &dn : desired) {
+			if (dn.is_root || !live.has(dn.id)) {
+				continue;
+			}
+			Node *node = live[dn.id];
+			Node *want_parent = (dn.parent_id == root_id) ? instance_root : (live.has(dn.parent_id) ? live[dn.parent_id] : nullptr);
+			if (want_parent && node->get_parent() != want_parent) {
+				node->reparent(want_parent, false);
+			}
+			if (node->get_name() != dn.name) {
+				node->set_name(dn.name);
+			}
+		}
+
+		// 4) Apply property values and revert overrides that were removed from the scene file.
+		for (const DesiredNode &dn : desired) {
+			if (!live.has(dn.id)) {
+				continue;
+			}
+			Node *node = live[dn.id];
+
+			// Avoid relocating a nested instance root via its transform (see GH-86659).
+			const bool is_instance_root = (node == instance_root) && (node->get_parent() != scene_tree->root);
+
+			for (const KeyValue<StringName, Variant> &p : dn.props) {
+				if (is_instance_root && (p.key == SNAME("transform") || p.key == SNAME("position"))) {
+					continue;
+				}
+				node->set(p.key, p.value);
+			}
+
+			HashMap<int32_t, HashMap<StringName, Variant>>::Iterator old_node = snapshot.find(dn.id);
+			if (old_node) {
+				for (const KeyValue<StringName, Variant> &p : old_node->value) {
+					if (!dn.props.has(p.key)) {
+						node->set(p.key, _scene_property_default(node, p.key));
+					}
+				}
+			}
+		}
+
+		// 5) Reorder siblings to match the scene's child order.
+		for (const DesiredNode &dn : desired) {
+			if (dn.is_root || !live.has(dn.id)) {
+				continue;
+			}
+			Node *node = live[dn.id];
+			Node *parent = node->get_parent();
+			if (parent && dn.sibling_index < parent->get_child_count()) {
+				parent->move_child(node, dn.sibling_index);
+			}
+		}
+	}
+
+	// Remember the overrides applied this pass so the next reconciliation can revert removed ones.
+	snapshot.clear();
+	for (const DesiredNode &dn : desired) {
+		snapshot[dn.id] = dn.props;
+	}
 }
 
 void LiveEditor::_node_set_res_func(int p_id, const StringName &p_prop, const String &p_value) {

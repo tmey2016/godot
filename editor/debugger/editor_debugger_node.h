@@ -131,7 +131,6 @@ private:
 	void _update_margins();
 	void _sync_changed_files();
 	void _collect_changed_files(EditorFileSystemDirectory *p_dir, PackedStringArray &r_scripts, PackedStringArray &r_scenes, PackedStringArray &r_resources);
-	void _sync_scene_to_running_game(const String &p_scene_path);
 
 	friend class DebuggerEditorPlugin;
 	friend class DebugAdapterParser;
@@ -222,7 +221,7 @@ public:
 	void live_debug_restore_node(ObjectID p_id, const NodePath &p_at, int p_at_pos);
 	void live_debug_duplicate_node(const NodePath &p_at, const String &p_new_name);
 	void live_debug_reparent_node(const NodePath &p_at, const NodePath &p_new_place, const String &p_new_name, int p_at_pos);
-	void live_set_scene_node_property(const String &p_scene_path, const NodePath &p_node_path, const StringName &p_property, const Variant &p_value);
+	void reconcile_scene(const String &p_scene_path);
 
 	void set_debug_mute_audio(bool p_mute);
 	bool get_debug_mute_audio() const;
