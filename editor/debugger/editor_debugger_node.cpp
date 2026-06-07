@@ -359,7 +359,6 @@ void EditorDebuggerNode::_notification(int p_what) {
 		case NOTIFICATION_READY: {
 			_update_debug_options();
 			initializing = false;
-			EditorFileSystem::get_singleton()->connect("resources_reload", callable_mp(this, &EditorDebuggerNode::_filesystem_resources_reloaded));
 		} break;
 
 		case NOTIFICATION_PROCESS: {
@@ -377,14 +376,15 @@ void EditorDebuggerNode::_notification(int p_what) {
 
 			// Poll the filesystem for external changes so that files edited outside the editor
 			// (e.g. by an external tool) hot-reload in the running game without requiring the
-			// editor to regain focus. `scan_changes()` emits `resources_reload` for any changed
-			// non-imported files, which is handled by `_filesystem_resources_reloaded()`.
+			// editor to regain focus. `scan_changes()` refreshes the filesystem's cached metadata
+			// (including reimporting changed assets); `_sync_changed_files()` then forwards changed
+			// scripts, scenes and resources to the running game.
 			external_reload_scan_timeout -= get_process_delta_time();
 			if (external_reload_scan_timeout < 0) {
 				// Matches the editor's own background `scan_changes_timer` cadence.
 				external_reload_scan_timeout = 0.5;
 				EditorFileSystem::get_singleton()->scan_changes();
-				_sync_changed_scenes();
+				_sync_changed_files();
 			}
 
 			// Remote scene tree update.
@@ -707,23 +707,25 @@ void EditorDebuggerNode::reload_cached_files(const PackedStringArray &p_files) {
 	});
 }
 
-void EditorDebuggerNode::_filesystem_resources_reloaded(const PackedStringArray &p_resources) {
-	// Files edited outside the editor were detected as changed on disk (and are present in the
-	// editor's resource cache). Forward them to the running game so they hot-reload, mirroring
-	// what already happens on an in-editor save.
-	PackedStringArray scripts;
-	PackedStringArray cached_files;
-	for (const String &path : p_resources) {
-		const String type = ResourceLoader::get_resource_type(path);
-		if (ClassDB::is_parent_class(type, "Script")) {
-			scripts.push_back(path);
-		} else {
-			cached_files.push_back(path);
-		}
+void EditorDebuggerNode::_sync_changed_files() {
+	// Files edited outside the editor are not reliably reported through `resources_reload`: that
+	// signal only carries files kept in the editor's resource cache, so it misses scenes and
+	// resources whose owning scene is not open. Instead, detect changes across the whole project
+	// by modification time and forward them to the running game, which works regardless of whether
+	// a file is open in the editor. Imported assets are skipped here; they go through the reimport
+	// pipeline (`resources_reimported` -> `reload_cached_files`) instead.
+	EditorFileSystem *efs = EditorFileSystem::get_singleton();
+	if (!efs) {
+		return;
 	}
 
-	// Scripts go through the script editor's live-reload path, which honors the
-	// "Synchronize Script Changes" option and skips scripts that fail to parse.
+	PackedStringArray scripts;
+	PackedStringArray scenes;
+	PackedStringArray resources;
+	_collect_changed_files(efs->get_filesystem(), scripts, scenes, resources);
+
+	// Scripts go through the script editor's live-reload path, which honors the "Synchronize
+	// Script Changes" option and skips scripts that fail to parse.
 	if (!scripts.is_empty()) {
 		if (ScriptEditor *se = ScriptEditor::get_singleton()) {
 			for (const String &path : scripts) {
@@ -733,59 +735,54 @@ void EditorDebuggerNode::_filesystem_resources_reloaded(const PackedStringArray 
 	}
 
 	// Scenes and other resources are reloaded from disk in the running game so that new instances
-	// and shared resources (materials, etc.) pick up the changes. Note: the currently edited
-	// scene is not kept in the editor's resource cache, so it never reaches this signal; it is
-	// handled instead by `_sync_changed_scenes()`.
+	// and shared resources (materials, etc.) pick up the changes.
+	PackedStringArray cached_files = scenes;
+	cached_files.append_array(resources);
 	if (!cached_files.is_empty()) {
 		reload_cached_files(cached_files);
 	}
-}
 
-void EditorDebuggerNode::_sync_changed_scenes() {
-	// Scene files are not retained in the editor's resource cache, so external edits to them are
-	// not reported through `resources_reload`. Detect changes by modification time and, for every
-	// scene the game is running (whether or not it is open in the editor), reload the cached
-	// `PackedScene` (for future instantiations) and live-update any already running instances.
-	EditorFileSystem *efs = EditorFileSystem::get_singleton();
-	if (!efs) {
-		return;
-	}
-
-	PackedStringArray changed_scenes;
-	_collect_changed_scenes(efs->get_filesystem(), changed_scenes);
-	if (changed_scenes.is_empty()) {
-		return;
-	}
-
-	reload_cached_files(changed_scenes);
-	for (const String &path : changed_scenes) {
+	// For scenes, additionally push the on-disk property values to any already running instance as
+	// live edits, so the change is visible without re-instantiating the scene.
+	for (const String &path : scenes) {
 		_sync_scene_to_running_game(path);
 	}
 }
 
-void EditorDebuggerNode::_collect_changed_scenes(EditorFileSystemDirectory *p_dir, PackedStringArray &r_changed) {
+void EditorDebuggerNode::_collect_changed_files(EditorFileSystemDirectory *p_dir, PackedStringArray &r_scripts, PackedStringArray &r_scenes, PackedStringArray &r_resources) {
 	if (!p_dir) {
 		return;
 	}
 
 	for (int i = 0; i < p_dir->get_file_count(); i++) {
-		if (p_dir->get_file_type(i) != SNAME("PackedScene")) {
+		// Imported assets (those with a `.import`) are handled by the reimport pipeline, not here.
+		if (p_dir->get_file_import_modified_time(i) != 0) {
 			continue;
 		}
 
 		const String path = p_dir->get_file_path(i);
 		// Use the modification time cached by `EditorFileSystem::scan_changes()` (invoked just
-		// before this in the process loop) to avoid a `stat()` per scene file on every tick.
+		// before this in the process loop) to avoid a `stat()` per file on every tick.
 		const uint64_t modified_time = p_dir->get_file_modified_time(i);
-		const uint64_t *last_modified_time = scene_modified_times.getptr(path);
-		if (last_modified_time && *last_modified_time != modified_time) {
-			r_changed.push_back(path);
+		const uint64_t *last_modified_time = file_modified_times.getptr(path);
+		const bool changed = last_modified_time && *last_modified_time != modified_time;
+		file_modified_times[path] = modified_time;
+		if (!changed) {
+			continue;
 		}
-		scene_modified_times[path] = modified_time;
+
+		const StringName type = p_dir->get_file_type(i);
+		if (ClassDB::is_parent_class(type, "Script")) {
+			r_scripts.push_back(path);
+		} else if (type == SNAME("PackedScene")) {
+			r_scenes.push_back(path);
+		} else {
+			r_resources.push_back(path);
+		}
 	}
 
 	for (int i = 0; i < p_dir->get_subdir_count(); i++) {
-		_collect_changed_scenes(p_dir->get_subdir(i), r_changed);
+		_collect_changed_files(p_dir->get_subdir(i), r_scripts, r_scenes, r_resources);
 	}
 }
 
