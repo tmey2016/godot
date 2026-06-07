@@ -31,6 +31,7 @@
 #include "editor_debugger_node.h"
 
 #include "core/config/engine.h"
+#include "core/io/file_access.h"
 #include "core/io/resource_loader.h"
 #include "core/object/callable_mp.h"
 #include "core/object/class_db.h"
@@ -384,6 +385,7 @@ void EditorDebuggerNode::_notification(int p_what) {
 				// Matches the editor's own background `scan_changes_timer` cadence.
 				external_reload_scan_timeout = 0.5;
 				EditorFileSystem::get_singleton()->scan_changes();
+				_sync_edited_scene_if_changed();
 			}
 
 			// Remote scene tree update.
@@ -707,20 +709,17 @@ void EditorDebuggerNode::reload_cached_files(const PackedStringArray &p_files) {
 }
 
 void EditorDebuggerNode::_filesystem_resources_reloaded(const PackedStringArray &p_resources) {
-	// Files edited outside the editor were detected as changed on disk. Forward them to the
-	// running game so they hot-reload, mirroring what already happens on an in-editor save.
+	// Files edited outside the editor were detected as changed on disk (and are present in the
+	// editor's resource cache). Forward them to the running game so they hot-reload, mirroring
+	// what already happens on an in-editor save.
 	PackedStringArray scripts;
 	PackedStringArray cached_files;
-	PackedStringArray scenes;
 	for (const String &path : p_resources) {
 		const String type = ResourceLoader::get_resource_type(path);
 		if (ClassDB::is_parent_class(type, "Script")) {
 			scripts.push_back(path);
 		} else {
 			cached_files.push_back(path);
-			if (type == "PackedScene") {
-				scenes.push_back(path);
-			}
 		}
 	}
 
@@ -734,16 +733,35 @@ void EditorDebuggerNode::_filesystem_resources_reloaded(const PackedStringArray 
 		}
 	}
 
-	// Scenes and other resources are reloaded from disk in the running game so that any new
-	// instances and shared resources (materials, etc.) pick up the changes.
+	// Scenes and other resources are reloaded from disk in the running game so that new instances
+	// and shared resources (materials, etc.) pick up the changes. Note: the currently edited
+	// scene is not kept in the editor's resource cache, so it never reaches this signal; it is
+	// handled instead by `_sync_edited_scene_if_changed()`.
 	if (!cached_files.is_empty()) {
 		reload_cached_files(cached_files);
 	}
+}
 
-	// For scenes, also push the on-disk node property values to the already running instance as
-	// live edits, so changes are visible without re-instantiating the scene (this is gated by
-	// the "Synchronize Scene Changes" option via `live_set_node_property()`).
-	for (const String &path : scenes) {
+void EditorDebuggerNode::_sync_edited_scene_if_changed() {
+	// The currently edited scene is not retained in the editor's resource cache, so external
+	// edits to it are not reported through `resources_reload`. Detect changes by modification
+	// time and push the new on-disk property values to the running instance as live edits.
+	Node *edited_scene = EditorNode::get_singleton()->get_edited_scene();
+	if (!edited_scene) {
+		return;
+	}
+
+	const String path = edited_scene->get_scene_file_path();
+	if (path.is_empty()) {
+		return;
+	}
+
+	const uint64_t modified_time = FileAccess::get_modified_time(path);
+	const uint64_t *last_modified_time = edited_scene_modified_times.getptr(path);
+	const bool changed = last_modified_time && *last_modified_time != modified_time;
+	edited_scene_modified_times[path] = modified_time;
+
+	if (changed) {
 		_sync_scene_to_running_game(path);
 	}
 }

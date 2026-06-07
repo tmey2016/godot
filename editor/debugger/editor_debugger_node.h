@@ -112,6 +112,7 @@ private:
 	// that files edited outside the editor reload in the running game without needing the
 	// editor to regain focus.
 	float external_reload_scan_timeout = 0.0;
+	HashMap<String, uint64_t> edited_scene_modified_times;
 	bool auto_switch_remote_scene_tree = false;
 	bool debug_with_external_editor = false;
 	bool keep_open = false;
@@ -128,6 +129,7 @@ private:
 	void _update_errors();
 	void _update_margins();
 	void _filesystem_resources_reloaded(const PackedStringArray &p_resources);
+	void _sync_edited_scene_if_changed();
 	void _sync_scene_to_running_game(const String &p_scene_path);
 
 	friend class DebuggerEditorPlugin;
