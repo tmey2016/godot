@@ -496,6 +496,13 @@ void SceneReconciler::seed_snapshot(const String &p_scene_path) {
 	}
 	Ref<PackedScene> packed_scene = ResourceCache::get_ref(p_scene_path);
 	if (packed_scene.is_null()) {
+		// A running game typically releases the PackedScene after instantiating it, so it is usually
+		// NOT in the resource cache. Load it from disk for the baseline -- the same fallback reconcile()
+		// uses. Without this the snapshot is never seeded, so a derived node removed from an inherited
+		// scene is never recognized as a deletion (its id is absent from the empty `derived_added_ids`).
+		packed_scene = ResourceLoader::load(p_scene_path, "PackedScene", ResourceFormatLoader::CACHE_MODE_IGNORE);
+	}
+	if (packed_scene.is_null()) {
 		return;
 	}
 	snapshots[p_scene_path] = _build_snapshot(packed_scene->get_state());

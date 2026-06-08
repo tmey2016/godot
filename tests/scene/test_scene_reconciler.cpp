@@ -649,6 +649,57 @@ TEST_CASE("[SceneTree][SceneReconciler] Multi-level inheritance removes only the
 	destroy_instance(instance);
 }
 
+TEST_CASE("[SceneTree][SceneReconciler] Seeds baseline from disk when the scene is not cached") {
+	// Regression test for the live-debugger path: a running game releases the PackedScene after
+	// instantiating it, so the scene is NOT in the resource cache. seed_snapshot() must still capture
+	// the baseline (by loading from disk) -- otherwise `derived_added_ids` stays empty and a derived
+	// node later removed from an inherited scene is never recognized as a deletion. The other tests use
+	// the static core directly and so never exercise seed_snapshot()'s cache lookup.
+	Node *base_root = make_node(nullptr, "BaseRoot", 1);
+	make_node<Node2D>(base_root, "BaseChild", 2);
+	Ref<PackedScene> base = save_as_base(base_root, "reconciler_seed_base.tscn");
+	memdelete(base_root);
+
+	// Inherited scene with a derived node; saved to disk, but instantiated from the in-memory
+	// PackedScene so nothing ever caches it under `path`.
+	Node *inh1 = new_inherited_root(base);
+	make_node<Node2D>(inh1, "DerivedChild", 3);
+	Ref<PackedScene> ps1 = pack_inherited(inh1);
+	memdelete(inh1);
+	const String path = TestUtils::get_temp_path("reconciler_seed_inherited.tscn");
+	REQUIRE(ResourceSaver::save(ps1, path) == OK);
+
+	Node *instance = ps1->instantiate();
+	SceneTree::get_singleton()->get_root()->add_child(instance);
+	ps1.unref();
+	REQUIRE_FALSE(ResourceCache::has(path)); // Precondition: cache miss, so seeding must fall back to disk.
+
+	// Seed the baseline from the on-disk scene (still has DerivedChild).
+	SceneReconciler reconciler;
+	reconciler.seed_snapshot(path);
+
+	// Overwrite the scene on disk with DerivedChild removed, then reconcile the running instance.
+	Node *inh2 = new_inherited_root(base);
+	Ref<PackedScene> ps2 = pack_inherited(inh2);
+	memdelete(inh2);
+	REQUIRE(ResourceSaver::save(ps2, path) == OK);
+	ps2.unref();
+
+	Node *live_derived = instance->get_node_or_null(NodePath("DerivedChild"));
+	Node *live_base = instance->get_node_or_null(NodePath("BaseChild"));
+	REQUIRE(live_derived != nullptr);
+	REQUIRE(live_base != nullptr);
+
+	LocalVector<Node *> instances;
+	instances.push_back(instance);
+	reconciler.reconcile(path, instances);
+
+	CHECK(live_derived->is_queued_for_deletion()); // derived-added node removed thanks to the seeded baseline
+	CHECK_FALSE(live_base->is_queued_for_deletion()); // inherited base node preserved
+
+	destroy_instance(instance);
+}
+
 #endif // TOOLS_ENABLED
 
 } // namespace TestSceneReconciler
