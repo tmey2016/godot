@@ -455,11 +455,28 @@ static Ref<PackedScene> save_as_base(Node *p_root, const String &p_file_suffix) 
 }
 
 // Instantiates `p_base` as the root of a NEW inherited scene (base nodes present, inheritance state
-// set), so the caller can author derived nodes on top before packing.
+// set), so the caller can author derived nodes on top before packing. Mirrors EditorNode's "open as
+// inherited" sequence -- without explicitly setting the inherited state, pack() would FLATTEN the
+// base into the derived scene (enumerating every base node with a real type) instead of storing only
+// a delta over it, which would make the inherited-scene tests pass for the wrong reason.
 static Node *new_inherited_root(const Ref<PackedScene> &p_base) {
 	Node *root = p_base->instantiate(PackedScene::GEN_EDIT_STATE_MAIN_INHERITED);
 	REQUIRE(root != nullptr);
+	Ref<SceneState> base_state = p_base->get_state();
+	base_state->set_path(p_base->get_path()); // pack() reloads the base by this path to record it.
+	root->set_scene_inherited_state(base_state);
+	root->set_scene_file_path(String());
+	root->set_scene_instance_state(Ref<SceneState>());
 	return root;
+}
+
+// Packs an inherited root and asserts the result is a genuine inherited scene (a delta over a base),
+// not a flattened copy. The guard is the whole point: it fails the test setup loudly if inheritance
+// didn't take, so the assertions that follow can't pass vacuously.
+static Ref<PackedScene> pack_inherited(Node *p_root) {
+	Ref<PackedScene> ps = pack(p_root);
+	REQUIRE(ps->get_state()->get_base_scene_state().is_valid());
+	return ps;
 }
 
 TEST_CASE("[SceneTree][SceneReconciler] Inherited scene removes a derived-added node but keeps base nodes") {
@@ -472,7 +489,7 @@ TEST_CASE("[SceneTree][SceneReconciler] Inherited scene removes a derived-added 
 	// Inherited v1: adds DerivedChild(3) under the inherited root.
 	Node *inh1 = new_inherited_root(base);
 	make_node<Node2D>(inh1, "DerivedChild", 3);
-	Ref<PackedScene> ps1 = pack(inh1);
+	Ref<PackedScene> ps1 = pack_inherited(inh1);
 	memdelete(inh1);
 
 	Node *instance = instantiate_in_tree(ps1);
@@ -486,7 +503,7 @@ TEST_CASE("[SceneTree][SceneReconciler] Inherited scene removes a derived-added 
 
 	// Inherited v2: DerivedChild dropped; base subtree untouched.
 	Node *inh2 = new_inherited_root(base);
-	Ref<PackedScene> ps2 = pack(inh2);
+	Ref<PackedScene> ps2 = pack_inherited(inh2);
 	memdelete(inh2);
 
 	reconcile(instance, ps2->get_state(), snapshot);
@@ -507,7 +524,7 @@ TEST_CASE("[SceneTree][SceneReconciler] Inherited scene never removes an untouch
 	memdelete(base_root);
 
 	Node *inh1 = new_inherited_root(base);
-	Ref<PackedScene> ps1 = pack(inh1);
+	Ref<PackedScene> ps1 = pack_inherited(inh1);
 	memdelete(inh1);
 
 	Node *instance = instantiate_in_tree(ps1);
@@ -535,7 +552,7 @@ TEST_CASE("[SceneTree][SceneReconciler] Inherited scene renames a derived-added 
 	// v1: DerivedChild(3).
 	Node *inh1 = new_inherited_root(base);
 	make_node<Node2D>(inh1, "DerivedChild", 3);
-	Ref<PackedScene> ps1 = pack(inh1);
+	Ref<PackedScene> ps1 = pack_inherited(inh1);
 	memdelete(inh1);
 
 	Node *instance = instantiate_in_tree(ps1);
@@ -544,7 +561,7 @@ TEST_CASE("[SceneTree][SceneReconciler] Inherited scene renames a derived-added 
 	// v2: same id (3), renamed to RenamedChild.
 	Node *inh2 = new_inherited_root(base);
 	make_node<Node2D>(inh2, "RenamedChild", 3);
-	Ref<PackedScene> ps2 = pack(inh2);
+	Ref<PackedScene> ps2 = pack_inherited(inh2);
 	memdelete(inh2);
 
 	reconcile(instance, ps2->get_state(), snapshot);
@@ -565,7 +582,7 @@ TEST_CASE("[SceneTree][SceneReconciler] Inherited scene reparents a derived-adde
 	// v1: DerivedChild(3) directly under the inherited root.
 	Node *inh1 = new_inherited_root(base);
 	make_node<Node2D>(inh1, "DerivedChild", 3);
-	Ref<PackedScene> ps1 = pack(inh1);
+	Ref<PackedScene> ps1 = pack_inherited(inh1);
 	memdelete(inh1);
 
 	Node *instance = instantiate_in_tree(ps1);
@@ -576,7 +593,7 @@ TEST_CASE("[SceneTree][SceneReconciler] Inherited scene reparents a derived-adde
 	Node *base_child = inh2->get_node_or_null(NodePath("BaseChild"));
 	REQUIRE(base_child != nullptr);
 	make_node<Node2D>(base_child, "DerivedChild", 3);
-	Ref<PackedScene> ps2 = pack(inh2);
+	Ref<PackedScene> ps2 = pack_inherited(inh2);
 	memdelete(inh2);
 
 	reconcile(instance, ps2->get_state(), snapshot);
@@ -598,12 +615,13 @@ TEST_CASE("[SceneTree][SceneReconciler] Multi-level inheritance removes only the
 	Node *b_root = new_inherited_root(a);
 	make_node<Node2D>(b_root, "BChild", 3);
 	Ref<PackedScene> b = save_as_base(b_root, "reconciler_inherited_multi_b.tscn");
+	REQUIRE(b->get_state()->get_base_scene_state().is_valid()); // B genuinely inherits A.
 	memdelete(b_root);
 
 	// C inherits B and adds CChild(4).
 	Node *c1 = new_inherited_root(b);
 	make_node<Node2D>(c1, "CChild", 4);
-	Ref<PackedScene> ps_c1 = pack(c1);
+	Ref<PackedScene> ps_c1 = pack_inherited(c1);
 	memdelete(c1);
 
 	Node *instance = instantiate_in_tree(ps_c1);
@@ -619,7 +637,7 @@ TEST_CASE("[SceneTree][SceneReconciler] Multi-level inheritance removes only the
 	// C v2 drops CChild. AChild and BChild are inherited (empty type in C's state) and must survive;
 	// only C's own node is eligible for removal.
 	Node *c2 = new_inherited_root(b);
-	Ref<PackedScene> ps_c2 = pack(c2);
+	Ref<PackedScene> ps_c2 = pack_inherited(c2);
 	memdelete(c2);
 
 	reconcile(instance, ps_c2->get_state(), snapshot);
