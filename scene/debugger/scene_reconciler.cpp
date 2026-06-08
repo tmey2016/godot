@@ -132,6 +132,10 @@ struct DesiredNode {
 	int32_t id = Node::UNIQUE_SCENE_ID_UNASSIGNED;
 	int32_t parent_id = Node::UNIQUE_SCENE_ID_UNASSIGNED;
 	bool is_root = false;
+	// True when this scene authors the node itself (it has a real type), as opposed to an inherited
+	// base node or override (TYPE_INSTANTIATED, empty type). Gates structural edits for inherited
+	// scenes: only derived-added nodes may be removed/reparented/renamed there.
+	bool derived_added = false;
 	StringName name;
 	StringName type;
 	Ref<PackedScene> instance;
@@ -177,6 +181,11 @@ SceneReconciler::SceneSnapshot SceneReconciler::_build_snapshot(const Ref<SceneS
 		const int32_t id = p_state->get_node_unique_id(i);
 		if (id == Node::UNIQUE_SCENE_ID_UNASSIGNED) {
 			continue;
+		}
+		// A non-empty type means the scene authors this node itself; an empty type is an inherited
+		// base node / override (TYPE_INSTANTIATED). The root (i == 0) is never a structural candidate.
+		if (i != 0 && !p_state->get_node_type(i).is_empty()) {
+			snapshot.derived_added_ids.insert(id);
 		}
 		HashMap<StringName, Variant> props;
 		HashSet<StringName> groups;
@@ -238,6 +247,7 @@ SceneReconciler::SceneSnapshot SceneReconciler::reconcile_against_state(const Lo
 		dn.name = p_state->get_node_name(i);
 		dn.type = p_state->get_node_type(i);
 		dn.instance = p_state->get_node_instance(i);
+		dn.derived_added = !dn.is_root && !String(dn.type).is_empty();
 		if (!dn.is_root) {
 			dn.parent_path = p_state->get_node_path(i, true);
 			if (path_to_id.has(dn.parent_path)) {
@@ -249,9 +259,14 @@ SceneReconciler::SceneSnapshot SceneReconciler::reconcile_against_state(const Lo
 		desired.push_back(dn);
 	}
 
-	// Inherited scenes may not enumerate their inherited base nodes in this state, so removing or
-	// reparenting nodes merely because they are "absent" is unsafe (it could delete base nodes).
-	// Restrict inherited scenes to additive reconciliation (properties, groups, connections, adds).
+	// Inherited scenes don't enumerate unchanged base nodes in this state, so a node being "absent"
+	// can't be read as "deleted" for base nodes. `allow_structural_changes` is true only for a
+	// non-inherited scene, where the state fully describes the tree and any structural change is safe.
+	// For an inherited scene it is false, and structural edits are instead restricted to the nodes the
+	// derived scene authors itself (`DesiredNode::derived_added` / the previous snapshot's
+	// `derived_added_ids`): those can be removed/reparented/renamed, while inherited base nodes are
+	// never touched structurally. (Base nodes can't be deleted or renamed through the editor anyway,
+	// and a base-node reparent isn't persisted to the inherited scene file.)
 	const bool allow_structural_changes = p_state->get_base_scene_state().is_null();
 
 	SceneTree *scene_tree = SceneTree::get_singleton();
@@ -262,18 +277,28 @@ SceneReconciler::SceneSnapshot SceneReconciler::reconcile_against_state(const Lo
 		const int32_t root_id = instance_root->get_unique_scene_id();
 
 		// 1) Remove nodes that no longer exist (only subtree roots; children go with their parent).
+		// A live id'd node absent from the scene file is a removal candidate. For inherited scenes we
+		// additionally require it to have been a derived-added node last pass (`derived_added_ids`):
+		// inherited base nodes aren't enumerated in the state, so an absent base node must never be
+		// treated as a deletion. Base nodes are never in `derived_added_ids`, so they are never removed.
 		LocalVector<Node *> to_remove;
-		for (const KeyValue<int32_t, Node *> &kv : live) {
-			if (!allow_structural_changes) {
-				break; // Never remove from an inherited scene (see `allow_structural_changes`).
+		auto is_removal_candidate = [&](int32_t p_id) {
+			if (p_id == root_id || desired_index.has(p_id)) {
+				return false;
 			}
-			if (kv.key == root_id || desired_index.has(kv.key)) {
+			return allow_structural_changes || p_previous.derived_added_ids.has(p_id);
+		};
+		for (const KeyValue<int32_t, Node *> &kv : live) {
+			if (!is_removal_candidate(kv.key)) {
 				continue;
 			}
 			bool ancestor_removed = false;
 			for (Node *p = kv.value->get_parent(); p && p != instance_root; p = p->get_parent()) {
 				const int32_t pid = p->get_unique_scene_id();
-				if (pid != Node::UNIQUE_SCENE_ID_UNASSIGNED && live.has(pid) && !desired_index.has(pid)) {
+				// Skip this node only if an ancestor is itself a removal candidate (it will be freed,
+				// taking this subtree with it). Using the same predicate keeps a non-candidate base
+				// ancestor from suppressing a legitimate derived-node removal.
+				if (pid != Node::UNIQUE_SCENE_ID_UNASSIGNED && live.has(pid) && is_removal_candidate(pid)) {
 					ancestor_removed = true;
 					break;
 				}
@@ -314,13 +339,15 @@ SceneReconciler::SceneSnapshot SceneReconciler::reconcile_against_state(const Lo
 			live[dn.id] = node;
 		}
 
-		// 3) Reparent / rename existing nodes whose place in the tree changed. Skipped for inherited
-		// scenes, whose state may not fully describe the tree (see `allow_structural_changes`).
+		// 3) Reparent / rename existing nodes whose place in the tree changed. For inherited scenes this
+		// is restricted to derived-added nodes: base nodes can't be renamed/reparented through the
+		// editor, and the inherited state may not fully describe the base tree (see
+		// `allow_structural_changes`).
 		for (const DesiredNode &dn : desired) {
-			if (!allow_structural_changes) {
-				break;
-			}
 			if (dn.is_root || !live.has(dn.id)) {
+				continue;
+			}
+			if (!allow_structural_changes && !dn.derived_added) {
 				continue;
 			}
 			Node *node = live[dn.id];

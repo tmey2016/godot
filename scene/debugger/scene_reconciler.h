@@ -67,6 +67,11 @@ public:
 		HashMap<int32_t, HashMap<StringName, Variant>> node_props; // id -> explicitly set properties.
 		HashMap<int32_t, HashSet<StringName>> node_groups; // id -> persistent groups.
 		HashMap<String, ConnectionInfo> connections; // connection key -> connection.
+		// Ids of nodes the scene itself authors (real type), as opposed to inherited base nodes
+		// (which are TYPE_INSTANTIATED and carry an empty type). For an inherited scene this is the
+		// only set of nodes that may be removed/reparented/renamed live: base nodes aren't enumerated
+		// in the inherited state, so "absent" can't be read as "deleted" for them.
+		HashSet<int32_t> derived_added_ids;
 	};
 
 	// Captures the scene's currently cached state as the baseline for revert, unless one already

@@ -34,6 +34,8 @@ TEST_FORCE_LINK(test_scene_reconciler)
 
 #ifdef DEBUG_ENABLED
 
+#include "core/io/resource_loader.h"
+#include "core/io/resource_saver.h"
 #include "core/object/class_db.h"
 #include "core/variant/callable.h"
 #include "scene/2d/node_2d.h"
@@ -42,6 +44,7 @@ TEST_FORCE_LINK(test_scene_reconciler)
 #include "scene/main/scene_tree.h"
 #include "scene/main/window.h"
 #include "scene/resources/packed_scene.h"
+#include "tests/test_utils.h"
 
 namespace TestSceneReconciler {
 
@@ -432,6 +435,203 @@ TEST_CASE("[SceneTree][SceneReconciler] Reconciling a bound connection neither d
 
 	destroy_instance(instance);
 }
+
+// Inherited-scene reconciliation. Authoring an inherited scene requires instantiating a base scene
+// with an editor edit state, which is only available in tools builds, so these are gated on
+// TOOLS_ENABLED (the live reconciler itself runs in any debug build).
+#ifdef TOOLS_ENABLED
+
+// Packs `p_root`, saves it to a temp .tscn, and loads it back with a real resource path. An
+// inheritance base must be loadable by path, because packing an inherited scene reloads its base
+// from disk (see SceneState::pack).
+static Ref<PackedScene> save_as_base(Node *p_root, const String &p_file_suffix) {
+	const String path = TestUtils::get_temp_path(p_file_suffix);
+	Error err = ResourceSaver::save(pack(p_root), path);
+	REQUIRE(err == OK);
+	Ref<PackedScene> base = ResourceLoader::load(path, "PackedScene", ResourceFormatLoader::CACHE_MODE_IGNORE, &err);
+	REQUIRE(err == OK);
+	REQUIRE(base.is_valid());
+	return base;
+}
+
+// Instantiates `p_base` as the root of a NEW inherited scene (base nodes present, inheritance state
+// set), so the caller can author derived nodes on top before packing.
+static Node *new_inherited_root(const Ref<PackedScene> &p_base) {
+	Node *root = p_base->instantiate(PackedScene::GEN_EDIT_STATE_MAIN_INHERITED);
+	REQUIRE(root != nullptr);
+	return root;
+}
+
+TEST_CASE("[SceneTree][SceneReconciler] Inherited scene removes a derived-added node but keeps base nodes") {
+	// Base: BaseRoot(1) -> BaseChild(2).
+	Node *base_root = make_node(nullptr, "BaseRoot", 1);
+	make_node<Node2D>(base_root, "BaseChild", 2);
+	Ref<PackedScene> base = save_as_base(base_root, "reconciler_inherited_remove_base.tscn");
+	memdelete(base_root);
+
+	// Inherited v1: adds DerivedChild(3) under the inherited root.
+	Node *inh1 = new_inherited_root(base);
+	make_node<Node2D>(inh1, "DerivedChild", 3);
+	Ref<PackedScene> ps1 = pack(inh1);
+	memdelete(inh1);
+
+	Node *instance = instantiate_in_tree(ps1);
+	Node *live_base_child = instance->get_node_or_null(NodePath("BaseChild"));
+	Node *live_derived_child = instance->get_node_or_null(NodePath("DerivedChild"));
+	REQUIRE(live_base_child != nullptr);
+	REQUIRE(live_derived_child != nullptr);
+
+	// Seed the snapshot from v1: records derived_added_ids = {3} (the base child is not derived-added).
+	SceneReconciler::SceneSnapshot snapshot = reconcile(instance, ps1->get_state(), SceneReconciler::SceneSnapshot());
+
+	// Inherited v2: DerivedChild dropped; base subtree untouched.
+	Node *inh2 = new_inherited_root(base);
+	Ref<PackedScene> ps2 = pack(inh2);
+	memdelete(inh2);
+
+	reconcile(instance, ps2->get_state(), snapshot);
+
+	// The derived-added node is removed (deferred); the inherited base node is preserved. This is the
+	// core safety property: an absent base node must NOT be treated as a deletion.
+	CHECK(live_derived_child->is_queued_for_deletion());
+	CHECK_FALSE(live_base_child->is_queued_for_deletion());
+
+	destroy_instance(instance);
+}
+
+TEST_CASE("[SceneTree][SceneReconciler] Inherited scene never removes an untouched base node") {
+	// Base: BaseRoot(1) -> BaseChild(2). The inherited scene adds nothing.
+	Node *base_root = make_node(nullptr, "BaseRoot", 1);
+	make_node<Node2D>(base_root, "BaseChild", 2);
+	Ref<PackedScene> base = save_as_base(base_root, "reconciler_inherited_keep_base.tscn");
+	memdelete(base_root);
+
+	Node *inh1 = new_inherited_root(base);
+	Ref<PackedScene> ps1 = pack(inh1);
+	memdelete(inh1);
+
+	Node *instance = instantiate_in_tree(ps1);
+	Node *live_base_child = instance->get_node_or_null(NodePath("BaseChild"));
+	REQUIRE(live_base_child != nullptr);
+
+	// The base child is enumerated by the base, not the derived state, so it never appears in
+	// `desired`. Reconciling must still leave it untouched.
+	SceneReconciler::SceneSnapshot snapshot = reconcile(instance, ps1->get_state(), SceneReconciler::SceneSnapshot());
+	reconcile(instance, ps1->get_state(), snapshot);
+
+	CHECK_FALSE(live_base_child->is_queued_for_deletion());
+	CHECK(instance->get_node_or_null(NodePath("BaseChild")) != nullptr);
+
+	destroy_instance(instance);
+}
+
+TEST_CASE("[SceneTree][SceneReconciler] Inherited scene renames a derived-added node") {
+	// Base: BaseRoot(1) -> BaseChild(2).
+	Node *base_root = make_node(nullptr, "BaseRoot", 1);
+	make_node<Node2D>(base_root, "BaseChild", 2);
+	Ref<PackedScene> base = save_as_base(base_root, "reconciler_inherited_rename_base.tscn");
+	memdelete(base_root);
+
+	// v1: DerivedChild(3).
+	Node *inh1 = new_inherited_root(base);
+	make_node<Node2D>(inh1, "DerivedChild", 3);
+	Ref<PackedScene> ps1 = pack(inh1);
+	memdelete(inh1);
+
+	Node *instance = instantiate_in_tree(ps1);
+	SceneReconciler::SceneSnapshot snapshot = reconcile(instance, ps1->get_state(), SceneReconciler::SceneSnapshot());
+
+	// v2: same id (3), renamed to RenamedChild.
+	Node *inh2 = new_inherited_root(base);
+	make_node<Node2D>(inh2, "RenamedChild", 3);
+	Ref<PackedScene> ps2 = pack(inh2);
+	memdelete(inh2);
+
+	reconcile(instance, ps2->get_state(), snapshot);
+
+	CHECK(instance->get_node_or_null(NodePath("RenamedChild")) != nullptr);
+	CHECK(instance->get_node_or_null(NodePath("DerivedChild")) == nullptr);
+
+	destroy_instance(instance);
+}
+
+TEST_CASE("[SceneTree][SceneReconciler] Inherited scene reparents a derived-added node under a base node") {
+	// Base: BaseRoot(1) -> BaseChild(2).
+	Node *base_root = make_node(nullptr, "BaseRoot", 1);
+	make_node<Node2D>(base_root, "BaseChild", 2);
+	Ref<PackedScene> base = save_as_base(base_root, "reconciler_inherited_reparent_base.tscn");
+	memdelete(base_root);
+
+	// v1: DerivedChild(3) directly under the inherited root.
+	Node *inh1 = new_inherited_root(base);
+	make_node<Node2D>(inh1, "DerivedChild", 3);
+	Ref<PackedScene> ps1 = pack(inh1);
+	memdelete(inh1);
+
+	Node *instance = instantiate_in_tree(ps1);
+	SceneReconciler::SceneSnapshot snapshot = reconcile(instance, ps1->get_state(), SceneReconciler::SceneSnapshot());
+
+	// v2: DerivedChild(3) moved under the inherited BaseChild.
+	Node *inh2 = new_inherited_root(base);
+	Node *base_child = inh2->get_node_or_null(NodePath("BaseChild"));
+	REQUIRE(base_child != nullptr);
+	make_node<Node2D>(base_child, "DerivedChild", 3);
+	Ref<PackedScene> ps2 = pack(inh2);
+	memdelete(inh2);
+
+	reconcile(instance, ps2->get_state(), snapshot);
+
+	CHECK(instance->get_node_or_null(NodePath("BaseChild/DerivedChild")) != nullptr);
+	CHECK(instance->get_node_or_null(NodePath("DerivedChild")) == nullptr);
+
+	destroy_instance(instance);
+}
+
+TEST_CASE("[SceneTree][SceneReconciler] Multi-level inheritance removes only the leaf scene's own node") {
+	// A(1) -> AChild(2).
+	Node *a_root = make_node(nullptr, "A", 1);
+	make_node<Node2D>(a_root, "AChild", 2);
+	Ref<PackedScene> a = save_as_base(a_root, "reconciler_inherited_multi_a.tscn");
+	memdelete(a_root);
+
+	// B inherits A and adds BChild(3); save B as a base too.
+	Node *b_root = new_inherited_root(a);
+	make_node<Node2D>(b_root, "BChild", 3);
+	Ref<PackedScene> b = save_as_base(b_root, "reconciler_inherited_multi_b.tscn");
+	memdelete(b_root);
+
+	// C inherits B and adds CChild(4).
+	Node *c1 = new_inherited_root(b);
+	make_node<Node2D>(c1, "CChild", 4);
+	Ref<PackedScene> ps_c1 = pack(c1);
+	memdelete(c1);
+
+	Node *instance = instantiate_in_tree(ps_c1);
+	Node *live_a_child = instance->get_node_or_null(NodePath("AChild"));
+	Node *live_b_child = instance->get_node_or_null(NodePath("BChild"));
+	Node *live_c_child = instance->get_node_or_null(NodePath("CChild"));
+	REQUIRE(live_a_child != nullptr);
+	REQUIRE(live_b_child != nullptr);
+	REQUIRE(live_c_child != nullptr);
+
+	SceneReconciler::SceneSnapshot snapshot = reconcile(instance, ps_c1->get_state(), SceneReconciler::SceneSnapshot());
+
+	// C v2 drops CChild. AChild and BChild are inherited (empty type in C's state) and must survive;
+	// only C's own node is eligible for removal.
+	Node *c2 = new_inherited_root(b);
+	Ref<PackedScene> ps_c2 = pack(c2);
+	memdelete(c2);
+
+	reconcile(instance, ps_c2->get_state(), snapshot);
+
+	CHECK(live_c_child->is_queued_for_deletion());
+	CHECK_FALSE(live_a_child->is_queued_for_deletion());
+	CHECK_FALSE(live_b_child->is_queued_for_deletion());
+
+	destroy_instance(instance);
+}
+
+#endif // TOOLS_ENABLED
 
 } // namespace TestSceneReconciler
 
