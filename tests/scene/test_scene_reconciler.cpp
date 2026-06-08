@@ -436,6 +436,50 @@ TEST_CASE("[SceneTree][SceneReconciler] Reconciling a bound connection neither d
 	destroy_instance(instance);
 }
 
+TEST_CASE("[SceneTree][SceneReconciler] Reverts a removed override seeded from a non-cached scene") {
+	// Companion to the inherited-removal regression: the disk-seed fallback also matters for plain
+	// scenes. Reverting an override removed by an external edit needs the baseline snapshot; if
+	// seed_snapshot() bailed on a cache miss (the running-game case), the baseline would be empty and
+	// the stale override would persist. Uses a non-inherited scene, so no tools build required.
+	Node *root1 = make_node(nullptr, "Root", 1);
+	make_node<Node2D>(root1, "Child", 2)->set_position(Vector2(5, 5)); // override over the (0,0) default.
+	Ref<PackedScene> ps1 = pack(root1);
+	memdelete(root1);
+	const String path = TestUtils::get_temp_path("reconciler_revert_seed.tscn");
+	REQUIRE(ResourceSaver::save(ps1, path) == OK);
+
+	// Instantiate from the in-memory PackedScene, then drop it so nothing caches the scene under `path`.
+	Node *instance = ps1->instantiate();
+	SceneTree::get_singleton()->get_root()->add_child(instance);
+	ps1.unref();
+	REQUIRE_FALSE(ResourceCache::has(path)); // Precondition: cache miss -> seeding must fall back to disk.
+
+	SceneReconciler reconciler;
+	reconciler.seed_snapshot(path); // baseline (from disk) records Child.position = (5, 5).
+
+	// v2 on disk: the position override is gone (back to the default).
+	Node *root2 = make_node(nullptr, "Root", 1);
+	make_node<Node2D>(root2, "Child", 2);
+	Ref<PackedScene> ps2 = pack(root2);
+	memdelete(root2);
+	REQUIRE(ResourceSaver::save(ps2, path) == OK);
+	ps2.unref();
+
+	Node2D *live_child = Object::cast_to<Node2D>(instance->get_node_or_null(NodePath("Child")));
+	REQUIRE(live_child != nullptr);
+	CHECK(live_child->get_position() == Vector2(5, 5)); // still overridden before reconcile.
+
+	LocalVector<Node *> instances;
+	instances.push_back(instance);
+	reconciler.reconcile(path, instances);
+
+	// The seeded baseline knew about the (5, 5) override, so its removal reverts the live node to the
+	// default. Without the disk-seed fallback the baseline would be empty and (5, 5) would persist.
+	CHECK(live_child->get_position() == Vector2(0, 0));
+
+	destroy_instance(instance);
+}
+
 // Inherited-scene reconciliation. Authoring an inherited scene requires instantiating a base scene
 // with an editor edit state, which is only available in tools builds, so these are gated on
 // TOOLS_ENABLED (the live reconciler itself runs in any debug build).
