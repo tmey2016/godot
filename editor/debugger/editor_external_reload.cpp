@@ -66,11 +66,9 @@ void EditorExternalReload::poll(EditorDebuggerNode *p_debugger, double p_delta) 
 
 	// Scripts go through the script editor's live-reload path, which honors "Synchronize Script
 	// Changes" and skips scripts that fail to parse.
-	if (!scripts.is_empty()) {
-		if (ScriptEditor *se = ScriptEditor::get_singleton()) {
-			for (const String &path : scripts) {
-				se->trigger_live_script_reload(path);
-			}
+	if (ScriptEditor *se = ScriptEditor::get_singleton()) {
+		for (const String &path : scripts) {
+			se->trigger_live_script_reload(path);
 		}
 	}
 
@@ -101,12 +99,15 @@ void EditorExternalReload::_collect_changed_files(EditorFileSystemDirectory *p_d
 		// Use the modification time cached by `scan_changes()` (called just before) to avoid a
 		// `stat()` per file on every poll.
 		const uint64_t modified_time = p_dir->get_file_modified_time(i);
-		const uint64_t *last_modified_time = file_modified_times.getptr(path);
-		const bool changed = last_modified_time && *last_modified_time != modified_time;
-		file_modified_times[path] = modified_time;
-		if (!changed) {
+		uint64_t *last_modified_time = file_modified_times.getptr(path);
+		if (last_modified_time == nullptr) {
+			file_modified_times.insert(path, modified_time); // First time seen: record baseline only.
 			continue;
 		}
+		if (*last_modified_time == modified_time) {
+			continue; // Unchanged since last poll: skip the redundant map write.
+		}
+		*last_modified_time = modified_time;
 
 		const StringName type = p_dir->get_file_type(i);
 		if (ClassDB::is_parent_class(type, "Script")) {

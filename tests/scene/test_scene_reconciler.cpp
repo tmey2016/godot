@@ -45,6 +45,22 @@ TEST_FORCE_LINK(test_scene_reconciler)
 
 namespace TestSceneReconciler {
 
+// Creates a node of type `T` with the given name and unique scene id. When `p_parent` is non-null the
+// node is added to it and owned by the scene root (so it is packed), mirroring how the editor authors
+// a scene. Returns the node so the caller can set extra properties / wire connections inline.
+template <typename T = Node>
+static T *make_node(Node *p_parent, const String &p_name, int32_t p_id) {
+	T *node = memnew(T);
+	node->set_name(p_name);
+	node->set_unique_scene_id(p_id);
+	if (p_parent) {
+		p_parent->add_child(node);
+		Node *owner = p_parent->get_owner();
+		node->set_owner(owner ? owner : p_parent);
+	}
+	return node;
+}
+
 // Packs `p_root` (which the caller owns) and returns the packed scene; its `SceneState` is the
 // "edited on disk" version a reconcile runs against.
 static Ref<PackedScene> pack(Node *p_root) {
@@ -53,6 +69,19 @@ static Ref<PackedScene> pack(Node *p_root) {
 	const Error err = packed_scene->pack(p_root);
 	CHECK(err == OK);
 	return packed_scene;
+}
+
+// Instantiates `p_scene` and adds it to the scene tree as a running instance.
+static Node *instantiate_in_tree(const Ref<PackedScene> &p_scene) {
+	Node *instance = p_scene->instantiate();
+	SceneTree::get_singleton()->get_root()->add_child(instance);
+	return instance;
+}
+
+// Removes a running instance from the tree and frees it.
+static void destroy_instance(Node *p_instance) {
+	SceneTree::get_singleton()->get_root()->remove_child(p_instance);
+	memdelete(p_instance);
 }
 
 // Reconciles `p_instance` against `p_state`, returning the resulting snapshot.
@@ -102,31 +131,14 @@ public:
 
 TEST_CASE("[SceneTree][SceneReconciler] Applies a changed property value") {
 	// v1: root -> child @ (1, 1).
-	Node *root1 = memnew(Node);
-	root1->set_name("Root");
-	root1->set_unique_scene_id(1);
-	Node2D *child1 = memnew(Node2D);
-	child1->set_name("Child");
-	child1->set_unique_scene_id(2);
-	child1->set_position(Vector2(1, 1));
-	root1->add_child(child1);
-	child1->set_owner(root1);
-
-	Ref<PackedScene> ps1 = pack(root1);
-	Node *instance = ps1->instantiate();
-	SceneTree::get_singleton()->get_root()->add_child(instance);
+	Node *root1 = make_node(nullptr, "Root", 1);
+	make_node<Node2D>(root1, "Child", 2)->set_position(Vector2(1, 1));
+	Node *instance = instantiate_in_tree(pack(root1));
 	memdelete(root1);
 
 	// v2: same node ids, child @ (2, 2).
-	Node *root2 = memnew(Node);
-	root2->set_name("Root");
-	root2->set_unique_scene_id(1);
-	Node2D *child2 = memnew(Node2D);
-	child2->set_name("Child");
-	child2->set_unique_scene_id(2);
-	child2->set_position(Vector2(2, 2));
-	root2->add_child(child2);
-	child2->set_owner(root2);
+	Node *root2 = make_node(nullptr, "Root", 1);
+	make_node<Node2D>(root2, "Child", 2)->set_position(Vector2(2, 2));
 	Ref<PackedScene> ps2 = pack(root2);
 	memdelete(root2);
 
@@ -136,35 +148,20 @@ TEST_CASE("[SceneTree][SceneReconciler] Applies a changed property value") {
 	CHECK(live_child != nullptr);
 	CHECK(live_child->get_position() == Vector2(2, 2));
 
-	SceneTree::get_singleton()->get_root()->remove_child(instance);
-	memdelete(instance);
+	destroy_instance(instance);
 }
 
 TEST_CASE("[SceneTree][SceneReconciler] Reverts a removed property override to default") {
 	// v1: child @ (5, 5) (an override).
-	Node *root1 = memnew(Node);
-	root1->set_name("Root");
-	root1->set_unique_scene_id(1);
-	Node2D *child1 = memnew(Node2D);
-	child1->set_name("Child");
-	child1->set_unique_scene_id(2);
-	child1->set_position(Vector2(5, 5));
-	root1->add_child(child1);
-	child1->set_owner(root1);
+	Node *root1 = make_node(nullptr, "Root", 1);
+	make_node<Node2D>(root1, "Child", 2)->set_position(Vector2(5, 5));
 	Ref<PackedScene> ps1 = pack(root1);
-	Node *instance = ps1->instantiate();
-	SceneTree::get_singleton()->get_root()->add_child(instance);
+	Node *instance = instantiate_in_tree(ps1);
 	memdelete(root1);
 
 	// v2: child at default position (override removed, so not stored).
-	Node *root2 = memnew(Node);
-	root2->set_name("Root");
-	root2->set_unique_scene_id(1);
-	Node2D *child2 = memnew(Node2D);
-	child2->set_name("Child");
-	child2->set_unique_scene_id(2);
-	root2->add_child(child2);
-	child2->set_owner(root2);
+	Node *root2 = make_node(nullptr, "Root", 1);
+	make_node<Node2D>(root2, "Child", 2);
 	Ref<PackedScene> ps2 = pack(root2);
 	memdelete(root2);
 
@@ -176,39 +173,20 @@ TEST_CASE("[SceneTree][SceneReconciler] Reverts a removed property override to d
 	CHECK(live_child != nullptr);
 	CHECK(live_child->get_position() == Vector2(0, 0));
 
-	SceneTree::get_singleton()->get_root()->remove_child(instance);
-	memdelete(instance);
+	destroy_instance(instance);
 }
 
 TEST_CASE("[SceneTree][SceneReconciler] Adds a new node") {
 	// v1: root -> A.
-	Node *root1 = memnew(Node);
-	root1->set_name("Root");
-	root1->set_unique_scene_id(1);
-	Node *a1 = memnew(Node);
-	a1->set_name("A");
-	a1->set_unique_scene_id(2);
-	root1->add_child(a1);
-	a1->set_owner(root1);
-	Ref<PackedScene> ps1 = pack(root1);
-	Node *instance = ps1->instantiate();
-	SceneTree::get_singleton()->get_root()->add_child(instance);
+	Node *root1 = make_node(nullptr, "Root", 1);
+	make_node(root1, "A", 2);
+	Node *instance = instantiate_in_tree(pack(root1));
 	memdelete(root1);
 
 	// v2: root -> A, B (B is new).
-	Node *root2 = memnew(Node);
-	root2->set_name("Root");
-	root2->set_unique_scene_id(1);
-	Node *a2 = memnew(Node);
-	a2->set_name("A");
-	a2->set_unique_scene_id(2);
-	root2->add_child(a2);
-	a2->set_owner(root2);
-	Node *b2 = memnew(Node);
-	b2->set_name("B");
-	b2->set_unique_scene_id(3);
-	root2->add_child(b2);
-	b2->set_owner(root2);
+	Node *root2 = make_node(nullptr, "Root", 1);
+	make_node(root2, "A", 2);
+	make_node(root2, "B", 3);
 	Ref<PackedScene> ps2 = pack(root2);
 	memdelete(root2);
 
@@ -217,39 +195,20 @@ TEST_CASE("[SceneTree][SceneReconciler] Adds a new node") {
 	CHECK(instance->get_child_count() == 2);
 	CHECK(instance->get_node_or_null(NodePath("B")) != nullptr);
 
-	SceneTree::get_singleton()->get_root()->remove_child(instance);
-	memdelete(instance);
+	destroy_instance(instance);
 }
 
 TEST_CASE("[SceneTree][SceneReconciler] Removes a deleted node") {
 	// v1: root -> A, B.
-	Node *root1 = memnew(Node);
-	root1->set_name("Root");
-	root1->set_unique_scene_id(1);
-	Node *a1 = memnew(Node);
-	a1->set_name("A");
-	a1->set_unique_scene_id(2);
-	root1->add_child(a1);
-	a1->set_owner(root1);
-	Node *b1 = memnew(Node);
-	b1->set_name("B");
-	b1->set_unique_scene_id(3);
-	root1->add_child(b1);
-	b1->set_owner(root1);
-	Ref<PackedScene> ps1 = pack(root1);
-	Node *instance = ps1->instantiate();
-	SceneTree::get_singleton()->get_root()->add_child(instance);
+	Node *root1 = make_node(nullptr, "Root", 1);
+	make_node(root1, "A", 2);
+	make_node(root1, "B", 3);
+	Node *instance = instantiate_in_tree(pack(root1));
 	memdelete(root1);
 
 	// v2: root -> A (B removed).
-	Node *root2 = memnew(Node);
-	root2->set_name("Root");
-	root2->set_unique_scene_id(1);
-	Node *a2 = memnew(Node);
-	a2->set_name("A");
-	a2->set_unique_scene_id(2);
-	root2->add_child(a2);
-	a2->set_owner(root2);
+	Node *root2 = make_node(nullptr, "Root", 1);
+	make_node(root2, "A", 2);
 	Ref<PackedScene> ps2 = pack(root2);
 	memdelete(root2);
 
@@ -261,44 +220,21 @@ TEST_CASE("[SceneTree][SceneReconciler] Removes a deleted node") {
 	// Removal is deferred via queue_free().
 	CHECK(live_b->is_queued_for_deletion());
 
-	SceneTree::get_singleton()->get_root()->remove_child(instance);
-	memdelete(instance);
+	destroy_instance(instance);
 }
 
 TEST_CASE("[SceneTree][SceneReconciler] Reparents a moved node") {
 	// v1: root -> A -> B.
-	Node *root1 = memnew(Node);
-	root1->set_name("Root");
-	root1->set_unique_scene_id(1);
-	Node *a1 = memnew(Node);
-	a1->set_name("A");
-	a1->set_unique_scene_id(2);
-	root1->add_child(a1);
-	a1->set_owner(root1);
-	Node *b1 = memnew(Node);
-	b1->set_name("B");
-	b1->set_unique_scene_id(3);
-	a1->add_child(b1);
-	b1->set_owner(root1);
-	Ref<PackedScene> ps1 = pack(root1);
-	Node *instance = ps1->instantiate();
-	SceneTree::get_singleton()->get_root()->add_child(instance);
+	Node *root1 = make_node(nullptr, "Root", 1);
+	Node *a1 = make_node(root1, "A", 2);
+	make_node(a1, "B", 3);
+	Node *instance = instantiate_in_tree(pack(root1));
 	memdelete(root1);
 
 	// v2: root -> A, B (B moved up to root).
-	Node *root2 = memnew(Node);
-	root2->set_name("Root");
-	root2->set_unique_scene_id(1);
-	Node *a2 = memnew(Node);
-	a2->set_name("A");
-	a2->set_unique_scene_id(2);
-	root2->add_child(a2);
-	a2->set_owner(root2);
-	Node *b2 = memnew(Node);
-	b2->set_name("B");
-	b2->set_unique_scene_id(3);
-	root2->add_child(b2);
-	b2->set_owner(root2);
+	Node *root2 = make_node(nullptr, "Root", 1);
+	make_node(root2, "A", 2);
+	make_node(root2, "B", 3);
 	Ref<PackedScene> ps2 = pack(root2);
 	memdelete(root2);
 
@@ -308,44 +244,21 @@ TEST_CASE("[SceneTree][SceneReconciler] Reparents a moved node") {
 	CHECK(live_b != nullptr);
 	CHECK(live_b->get_parent() == instance);
 
-	SceneTree::get_singleton()->get_root()->remove_child(instance);
-	memdelete(instance);
+	destroy_instance(instance);
 }
 
 TEST_CASE("[SceneTree][SceneReconciler] Reorders siblings") {
 	// v1: root -> [A, B].
-	Node *root1 = memnew(Node);
-	root1->set_name("Root");
-	root1->set_unique_scene_id(1);
-	Node *a1 = memnew(Node);
-	a1->set_name("A");
-	a1->set_unique_scene_id(2);
-	root1->add_child(a1);
-	a1->set_owner(root1);
-	Node *b1 = memnew(Node);
-	b1->set_name("B");
-	b1->set_unique_scene_id(3);
-	root1->add_child(b1);
-	b1->set_owner(root1);
-	Ref<PackedScene> ps1 = pack(root1);
-	Node *instance = ps1->instantiate();
-	SceneTree::get_singleton()->get_root()->add_child(instance);
+	Node *root1 = make_node(nullptr, "Root", 1);
+	make_node(root1, "A", 2);
+	make_node(root1, "B", 3);
+	Node *instance = instantiate_in_tree(pack(root1));
 	memdelete(root1);
 
 	// v2: root -> [B, A] (swapped).
-	Node *root2 = memnew(Node);
-	root2->set_name("Root");
-	root2->set_unique_scene_id(1);
-	Node *b2 = memnew(Node);
-	b2->set_name("B");
-	b2->set_unique_scene_id(3);
-	root2->add_child(b2);
-	b2->set_owner(root2);
-	Node *a2 = memnew(Node);
-	a2->set_name("A");
-	a2->set_unique_scene_id(2);
-	root2->add_child(a2);
-	a2->set_owner(root2);
+	Node *root2 = make_node(nullptr, "Root", 1);
+	make_node(root2, "B", 3);
+	make_node(root2, "A", 2);
 	Ref<PackedScene> ps2 = pack(root2);
 	memdelete(root2);
 
@@ -354,35 +267,20 @@ TEST_CASE("[SceneTree][SceneReconciler] Reorders siblings") {
 	CHECK(instance->get_child(0)->get_name() == StringName("B"));
 	CHECK(instance->get_child(1)->get_name() == StringName("A"));
 
-	SceneTree::get_singleton()->get_root()->remove_child(instance);
-	memdelete(instance);
+	destroy_instance(instance);
 }
 
 TEST_CASE("[SceneTree][SceneReconciler] Adds and reverts a group membership") {
 	// v1: child in no groups.
-	Node *root1 = memnew(Node);
-	root1->set_name("Root");
-	root1->set_unique_scene_id(1);
-	Node *child1 = memnew(Node);
-	child1->set_name("Child");
-	child1->set_unique_scene_id(2);
-	root1->add_child(child1);
-	child1->set_owner(root1);
+	Node *root1 = make_node(nullptr, "Root", 1);
+	make_node(root1, "Child", 2);
 	Ref<PackedScene> ps1 = pack(root1);
-	Node *instance = ps1->instantiate();
-	SceneTree::get_singleton()->get_root()->add_child(instance);
+	Node *instance = instantiate_in_tree(ps1);
 	memdelete(root1);
 
 	// v2: child in the "enemies" group (persistent).
-	Node *root2 = memnew(Node);
-	root2->set_name("Root");
-	root2->set_unique_scene_id(1);
-	Node *child2 = memnew(Node);
-	child2->set_name("Child");
-	child2->set_unique_scene_id(2);
-	root2->add_child(child2);
-	child2->set_owner(root2);
-	child2->add_to_group("enemies", true);
+	Node *root2 = make_node(nullptr, "Root", 1);
+	make_node(root2, "Child", 2)->add_to_group("enemies", true);
 	Ref<PackedScene> ps2 = pack(root2);
 	memdelete(root2);
 
@@ -397,44 +295,22 @@ TEST_CASE("[SceneTree][SceneReconciler] Adds and reverts a group membership") {
 	reconcile(instance, ps1->get_state(), snapshot);
 	CHECK_FALSE(live_child->is_in_group("enemies"));
 
-	SceneTree::get_singleton()->get_root()->remove_child(instance);
-	memdelete(instance);
+	destroy_instance(instance);
 }
 
 TEST_CASE("[SceneTree][SceneReconciler] Adds and reverts a signal connection") {
 	// v1: no connections.
-	Node *root1 = memnew(Node);
-	root1->set_name("Root");
-	root1->set_unique_scene_id(1);
-	Node *a1 = memnew(Node);
-	a1->set_name("A");
-	a1->set_unique_scene_id(2);
-	root1->add_child(a1);
-	a1->set_owner(root1);
-	Node *b1 = memnew(Node);
-	b1->set_name("B");
-	b1->set_unique_scene_id(3);
-	root1->add_child(b1);
-	b1->set_owner(root1);
+	Node *root1 = make_node(nullptr, "Root", 1);
+	make_node(root1, "A", 2);
+	make_node(root1, "B", 3);
 	Ref<PackedScene> ps1 = pack(root1);
-	Node *instance = ps1->instantiate();
-	SceneTree::get_singleton()->get_root()->add_child(instance);
+	Node *instance = instantiate_in_tree(ps1);
 	memdelete(root1);
 
 	// v2: A.ready -> B.set_process (persistent).
-	Node *root2 = memnew(Node);
-	root2->set_name("Root");
-	root2->set_unique_scene_id(1);
-	Node *a2 = memnew(Node);
-	a2->set_name("A");
-	a2->set_unique_scene_id(2);
-	root2->add_child(a2);
-	a2->set_owner(root2);
-	Node *b2 = memnew(Node);
-	b2->set_name("B");
-	b2->set_unique_scene_id(3);
-	root2->add_child(b2);
-	b2->set_owner(root2);
+	Node *root2 = make_node(nullptr, "Root", 1);
+	Node *a2 = make_node(root2, "A", 2);
+	Node *b2 = make_node(root2, "B", 3);
 	a2->connect("ready", Callable(b2, "set_process"), Object::CONNECT_PERSIST);
 	Ref<PackedScene> ps2 = pack(root2);
 	memdelete(root2);
@@ -453,30 +329,17 @@ TEST_CASE("[SceneTree][SceneReconciler] Adds and reverts a signal connection") {
 	reconcile(instance, ps1->get_state(), snapshot);
 	CHECK_FALSE(live_a->is_connected("ready", live_callable));
 
-	SceneTree::get_singleton()->get_root()->remove_child(instance);
-	memdelete(instance);
+	destroy_instance(instance);
 }
 
 TEST_CASE("[SceneTree][SceneReconciler] Reorder is robust to an id-less sibling") {
 	// Regression: the reorder pass once treated the dense rank over id'd nodes as an absolute live
 	// child index, so an id-less sibling (e.g. runtime-added) made it move id'd nodes to wrong slots.
 	// v1: root -> [A, B].
-	Node *root1 = memnew(Node);
-	root1->set_name("Root");
-	root1->set_unique_scene_id(1);
-	Node *a1 = memnew(Node);
-	a1->set_name("A");
-	a1->set_unique_scene_id(2);
-	root1->add_child(a1);
-	a1->set_owner(root1);
-	Node *b1 = memnew(Node);
-	b1->set_name("B");
-	b1->set_unique_scene_id(3);
-	root1->add_child(b1);
-	b1->set_owner(root1);
-	Ref<PackedScene> ps1 = pack(root1);
-	Node *instance = ps1->instantiate();
-	SceneTree::get_singleton()->get_root()->add_child(instance);
+	Node *root1 = make_node(nullptr, "Root", 1);
+	make_node(root1, "A", 2);
+	make_node(root1, "B", 3);
+	Node *instance = instantiate_in_tree(pack(root1));
 	memdelete(root1);
 
 	// Insert an id-less child at the front of the live instance (no unique id, not owned by the root,
@@ -487,19 +350,9 @@ TEST_CASE("[SceneTree][SceneReconciler] Reorder is robust to an id-less sibling"
 	instance->move_child(x, 0);
 
 	// v2: root -> [B, A] (id'd children swapped).
-	Node *root2 = memnew(Node);
-	root2->set_name("Root");
-	root2->set_unique_scene_id(1);
-	Node *b2 = memnew(Node);
-	b2->set_name("B");
-	b2->set_unique_scene_id(3);
-	root2->add_child(b2);
-	b2->set_owner(root2);
-	Node *a2 = memnew(Node);
-	a2->set_name("A");
-	a2->set_unique_scene_id(2);
-	root2->add_child(a2);
-	a2->set_owner(root2);
+	Node *root2 = make_node(nullptr, "Root", 1);
+	make_node(root2, "B", 3);
+	make_node(root2, "A", 2);
 	Ref<PackedScene> ps2 = pack(root2);
 	memdelete(root2);
 
@@ -510,8 +363,7 @@ TEST_CASE("[SceneTree][SceneReconciler] Reorder is robust to an id-less sibling"
 	CHECK(instance->get_child(1)->get_name() == StringName("B"));
 	CHECK(instance->get_child(2)->get_name() == StringName("A"));
 
-	SceneTree::get_singleton()->get_root()->remove_child(instance);
-	memdelete(instance);
+	destroy_instance(instance);
 }
 
 // Note: finding 6 (an id'd node whose authored parent has no unique id) is not covered here. It only
@@ -525,34 +377,16 @@ TEST_CASE("[SceneTree][SceneReconciler] Applies a new node's properties exactly 
 	GDREGISTER_CLASS(_ReconcilerSetterProbe);
 
 	// v1: root -> A.
-	Node *root1 = memnew(Node);
-	root1->set_name("Root");
-	root1->set_unique_scene_id(1);
-	Node *a1 = memnew(Node);
-	a1->set_name("A");
-	a1->set_unique_scene_id(2);
-	root1->add_child(a1);
-	a1->set_owner(root1);
-	Ref<PackedScene> ps1 = pack(root1);
-	Node *instance = ps1->instantiate();
-	SceneTree::get_singleton()->get_root()->add_child(instance);
+	Node *root1 = make_node(nullptr, "Root", 1);
+	make_node(root1, "A", 2);
+	Node *instance = instantiate_in_tree(pack(root1));
 	memdelete(root1);
 
 	// v2: root -> A, Probe (Probe is new, with a non-default `value`).
-	Node *root2 = memnew(Node);
-	root2->set_name("Root");
-	root2->set_unique_scene_id(1);
-	Node *a2 = memnew(Node);
-	a2->set_name("A");
-	a2->set_unique_scene_id(2);
-	root2->add_child(a2);
-	a2->set_owner(root2);
-	_ReconcilerSetterProbe *probe2 = memnew(_ReconcilerSetterProbe);
-	probe2->set_name("Probe");
-	probe2->set_unique_scene_id(3);
-	root2->add_child(probe2);
-	probe2->set_owner(root2);
-	probe2->set_value(7); // Authoring the override only; the live node is a fresh instance created by reconcile.
+	Node *root2 = make_node(nullptr, "Root", 1);
+	make_node(root2, "A", 2);
+	// Authoring the override only; the live node is a fresh instance created by reconcile.
+	make_node<_ReconcilerSetterProbe>(root2, "Probe", 3)->set_value(7);
 	Ref<PackedScene> ps2 = pack(root2);
 	memdelete(root2);
 
@@ -563,31 +397,19 @@ TEST_CASE("[SceneTree][SceneReconciler] Applies a new node's properties exactly 
 	CHECK(live_probe->get_value() == 7);
 	CHECK(live_probe->get_set_count() == 1); // Applied once, not twice.
 
-	SceneTree::get_singleton()->get_root()->remove_child(instance);
-	memdelete(instance);
+	destroy_instance(instance);
 }
 
 TEST_CASE("[SceneTree][SceneReconciler] Reconciling a bound connection neither duplicates nor leaks it") {
 	// Regression: connection identity was matched by full Callable equality, so a bound connection
 	// (whose rebuilt Callable may not compare equal to the instantiated one) could be connected twice
 	// or fail to disconnect. v1 authors the connection so the live one is created by instantiation.
-	Node *root1 = memnew(Node);
-	root1->set_name("Root");
-	root1->set_unique_scene_id(1);
-	Node *a1 = memnew(Node);
-	a1->set_name("A");
-	a1->set_unique_scene_id(2);
-	root1->add_child(a1);
-	a1->set_owner(root1);
-	Node *b1 = memnew(Node);
-	b1->set_name("B");
-	b1->set_unique_scene_id(3);
-	root1->add_child(b1);
-	b1->set_owner(root1);
+	Node *root1 = make_node(nullptr, "Root", 1);
+	Node *a1 = make_node(root1, "A", 2);
+	Node *b1 = make_node(root1, "B", 3);
 	a1->connect("ready", Callable(b1, "set_process").bind(true), Object::CONNECT_PERSIST);
 	Ref<PackedScene> ps1 = pack(root1);
-	Node *instance = ps1->instantiate();
-	SceneTree::get_singleton()->get_root()->add_child(instance);
+	Node *instance = instantiate_in_tree(ps1);
 	memdelete(root1);
 
 	Node *live_a = instance->get_node_or_null(NodePath("A"));
@@ -599,27 +421,16 @@ TEST_CASE("[SceneTree][SceneReconciler] Reconciling a bound connection neither d
 	CHECK(count_connections(live_a, "ready", "set_process") == 1);
 
 	// v2: connection removed -> the real (bound) connection must be disconnected, leaving none.
-	Node *root2 = memnew(Node);
-	root2->set_name("Root");
-	root2->set_unique_scene_id(1);
-	Node *a2 = memnew(Node);
-	a2->set_name("A");
-	a2->set_unique_scene_id(2);
-	root2->add_child(a2);
-	a2->set_owner(root2);
-	Node *b2 = memnew(Node);
-	b2->set_name("B");
-	b2->set_unique_scene_id(3);
-	root2->add_child(b2);
-	b2->set_owner(root2);
+	Node *root2 = make_node(nullptr, "Root", 1);
+	make_node(root2, "A", 2);
+	make_node(root2, "B", 3);
 	Ref<PackedScene> ps2 = pack(root2);
 	memdelete(root2);
 
 	reconcile(instance, ps2->get_state(), snapshot);
 	CHECK(count_connections(live_a, "ready", "set_process") == 0);
 
-	SceneTree::get_singleton()->get_root()->remove_child(instance);
-	memdelete(instance);
+	destroy_instance(instance);
 }
 
 } // namespace TestSceneReconciler

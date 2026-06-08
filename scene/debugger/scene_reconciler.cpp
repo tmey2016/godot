@@ -116,6 +116,17 @@ void _apply_node_groups(Node *p_node, const HashSet<StringName> &p_groups) {
 	}
 }
 
+// Read a state node's explicitly-set properties and persistent groups (used for both id'd and id-less
+// nodes).
+void _read_node_props_groups(const Ref<SceneState> &p_state, int p_idx, HashMap<StringName, Variant> &r_props, HashSet<StringName> &r_groups) {
+	for (int j = 0; j < p_state->get_node_property_count(p_idx); j++) {
+		r_props[p_state->get_node_property_name(p_idx, j)] = p_state->get_node_property_value(p_idx, j);
+	}
+	for (const StringName &g : p_state->get_node_groups(p_idx)) {
+		r_groups.insert(g);
+	}
+}
+
 // Structural description of a node that carries a unique id, in scene (parents-first) order.
 struct DesiredNode {
 	int32_t id = Node::UNIQUE_SCENE_ID_UNASSIGNED;
@@ -168,15 +179,9 @@ SceneReconciler::SceneSnapshot SceneReconciler::_build_snapshot(const Ref<SceneS
 			continue;
 		}
 		HashMap<StringName, Variant> props;
-		for (int j = 0; j < p_state->get_node_property_count(i); j++) {
-			props[p_state->get_node_property_name(i, j)] = p_state->get_node_property_value(i, j);
-		}
-		snapshot.node_props[id] = props;
-
 		HashSet<StringName> groups;
-		for (const StringName &g : p_state->get_node_groups(i)) {
-			groups.insert(g);
-		}
+		_read_node_props_groups(p_state, i, props, groups);
+		snapshot.node_props[id] = props;
 		snapshot.node_groups[id] = groups;
 	}
 
@@ -222,12 +227,7 @@ SceneReconciler::SceneSnapshot SceneReconciler::reconcile_against_state(const Lo
 		if (id == Node::UNIQUE_SCENE_ID_UNASSIGNED) {
 			UnassignedNode un;
 			un.path = p_state->get_node_path(i);
-			for (int j = 0; j < p_state->get_node_property_count(i); j++) {
-				un.props[p_state->get_node_property_name(i, j)] = p_state->get_node_property_value(i, j);
-			}
-			for (const StringName &g : p_state->get_node_groups(i)) {
-				un.groups.insert(g);
-			}
+			_read_node_props_groups(p_state, i, un.props, un.groups);
 			unassigned.push_back(un);
 			continue;
 		}
